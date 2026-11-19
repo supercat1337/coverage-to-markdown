@@ -375,9 +375,15 @@ function rejectPositionals(positionals) {
  */
 function readRequiredFlags(values) {
     const missing = [];
-    if (values.ranges === undefined) missing.push('--ranges');
-    if (values.input === undefined) missing.push('--input');
-    if (values.output === undefined) missing.push('--output');
+    if (values.ranges === undefined) {
+        missing.push('--ranges');
+    }
+    if (values.input === undefined) {
+        missing.push('--input');
+    }
+    if (values.output === undefined) {
+        missing.push('--output');
+    }
     if (missing.length > 0) {
         throw new Error(
             `Missing required argument(s): ${missing.join(', ')}. ` + 'Run with --help for usage.'
