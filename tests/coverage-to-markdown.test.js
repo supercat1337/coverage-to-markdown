@@ -13,6 +13,15 @@ import {
     buildMarkdown,
 } from '../src/coverage-to-markdown.js';
 
+/**
+ * Escape a string for safe interpolation into a RegExp.
+ * @param {string} s
+ * @returns {string}
+ */
+function escapeRegExp(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const cliPath = resolve(moduleDir, '../src/coverage-to-markdown.js');
 
@@ -437,15 +446,18 @@ describe('CLI', () => {
         assert.match(md, /## Range \(5, 10\)/);
     });
 
-    it('prints a summary to stdout', () => {
+    it('prints a multi-line summary with absolute paths and size', () => {
         const srcPath = join(tmpDir, 'src.js');
         const outPath = join(tmpDir, 'out.md');
-        writeFileSync(srcPath, 'x\n', 'utf8');
+        writeFileSync(srcPath, 'x\ny\nz\n', 'utf8');
 
         const result = run(['-r', '1', '-i', srcPath, '-o', outPath]);
         assert.equal(result.status, 0);
-        assert.match(result.stdout, /Wrote 1 range\(s\)/);
-        assert.match(result.stdout, /out\.md/);
+        assert.match(result.stdout, /coverage-to-markdown: wrote report/);
+        assert.match(result.stdout, new RegExp(`input:\\s+${escapeRegExp(srcPath)}`));
+        assert.match(result.stdout, new RegExp(`output:\\s+${escapeRegExp(outPath)}`));
+        assert.match(result.stdout, /ranges: 1 \(from 1 parsed\)/);
+        assert.match(result.stdout, /size:\s+\d+ bytes/);
     });
 
     it('prints help with --help and exits 0', () => {
@@ -602,5 +614,75 @@ describe('CLI', () => {
         assert.equal(result.status, 1);
         assert.match(result.stderr, /different files/);
         assert.equal(readFileSync(srcPath, 'utf8'), 'a\nb\nc\n');
+    });
+
+    it('prefixes error output for visibility', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        const outPath = join(tmpDir, 'out.md');
+        writeFileSync(srcPath, 'x\n', 'utf8');
+
+        const result = run(['-r', '5-2', '-i', srcPath, '-o', outPath]);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /^coverage-to-markdown: error:/m);
+        assert.match(result.stderr, /end < start/);
+        assert.doesNotMatch(result.stderr, /\n\s+at /);
+    });
+
+    it('prints --quiet suppresses the success summary', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        const outPath = join(tmpDir, 'out.md');
+        writeFileSync(srcPath, 'a\nb\n', 'utf8');
+
+        const result = run(['-r', '1', '-i', srcPath, '-o', outPath, '-q']);
+        assert.equal(result.status, 0);
+        assert.equal(result.stdout, '');
+        assert.match(readFileSync(outPath, 'utf8'), /## Range \(1, 1\)/);
+    });
+
+    it('rejects an --output path whose directory does not exist', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        writeFileSync(srcPath, 'a\n', 'utf8');
+        const missingDir = join(tmpDir, 'no', 'such', 'dir');
+        const outPath = join(missingDir, 'out.md');
+
+        const result = run(['-r', '1', '-i', srcPath, '-o', outPath]);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /Output directory does not exist/);
+        assert.match(result.stderr, /Create it first/);
+    });
+
+    it('prefixes error output for visibility', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        const outPath = join(tmpDir, 'out.md');
+        writeFileSync(srcPath, 'x\n', 'utf8');
+
+        const result = run(['-r', '5-2', '-i', srcPath, '-o', outPath]);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /^coverage-to-markdown: error:/m);
+        assert.match(result.stderr, /end < start/);
+        assert.doesNotMatch(result.stderr, /\n\s+at /);
+    });
+
+    it('prints --quiet suppresses the success summary', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        const outPath = join(tmpDir, 'out.md');
+        writeFileSync(srcPath, 'a\nb\n', 'utf8');
+
+        const result = run(['-r', '1', '-i', srcPath, '-o', outPath, '-q']);
+        assert.equal(result.status, 0);
+        assert.equal(result.stdout, '');
+        assert.match(readFileSync(outPath, 'utf8'), /## Range \(1, 1\)/);
+    });
+
+    it('rejects an --output path whose directory does not exist', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        writeFileSync(srcPath, 'a\n', 'utf8');
+        const missingDir = join(tmpDir, 'no', 'such', 'dir');
+        const outPath = join(missingDir, 'out.md');
+
+        const result = run(['-r', '1', '-i', srcPath, '-o', outPath]);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /Output directory does not exist/);
+        assert.match(result.stderr, /Create it first/);
     });
 });

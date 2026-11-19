@@ -18,9 +18,9 @@
  * fence length grows automatically when the snippet contains backtick
  * runs so that markdown fences never break.
  */
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { extname, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, extname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 /**
@@ -104,6 +104,7 @@ Options:
   -t, --title <s>         Top-level heading text (default: "Coverage: <basename>")
       --fence <lang>      Override fence language (default: from file extension)
   -f, --force             Overwrite the output file if it already exists
+  -q, --quiet             Suppress the success summary on stdout
   -h, --help              Show this help and exit
   -v, --version           Print version and exit
 
@@ -424,6 +425,33 @@ function guardFilePaths(sourcePath, outputPath, force) {
 }
 
 /**
+ * Check whether the current module was started as the main script.
+ *
+ * Compares real (symlink-resolved) paths instead of file URLs, because
+ * on Windows process.argv[1] and import.meta.url can disagree on drive
+ * letter case, on short (8.3) names, and on whether junctions are
+ * resolved when the script is launched through an npm bin shim — the
+ * exact setup that `npm link` produces.
+ * @returns {boolean}
+ */
+function isMainModule() {
+    const entry = process.argv[1];
+    if (entry === undefined) {
+        return false;
+    }
+    try {
+        const selfPath = realpathSync(fileURLToPath(import.meta.url));
+        const entryPath = realpathSync(resolve(entry));
+        if (process.platform === 'win32') {
+            return selfPath.toLowerCase() === entryPath.toLowerCase();
+        }
+        return selfPath === entryPath;
+    } catch {
+        return false;
+    }
+}
+
+/**
  * CLI entry point.
  * @param {string[]} argv
  * @returns {void}
@@ -441,6 +469,7 @@ function main(argv) {
                 title: { type: 'string', short: 't' },
                 fence: { type: 'string' },
                 force: { type: 'boolean', short: 'f' },
+                quiet: { type: 'boolean', short: 'q' },
                 help: { type: 'boolean', short: 'h' },
                 version: { type: 'boolean', short: 'v' },
             },
@@ -468,6 +497,14 @@ function main(argv) {
         const outputPath = resolve(flags.output);
         guardFilePaths(sourcePath, outputPath, values.force === true);
 
+        const outputDir = dirname(outputPath);
+        if (!existsSync(outputDir)) {
+            throw new Error(
+                `Output directory does not exist: ${outputDir}. ` +
+                    'Create it first, or choose a different --output path.'
+            );
+        }
+
         const rawRanges = parseRanges(flags.ranges);
         if (rawRanges.length === 0) {
             throw new Error('--ranges produced no ranges; check the input string.');
@@ -483,19 +520,32 @@ function main(argv) {
         });
 
         writeFileSync(outputPath, markdown, 'utf8');
-        const count = normalizeRanges(rawRanges).length;
-        process.stdout.write(`Wrote ${count} range(s) from ${sourcePath} to ${outputPath}\n`);
+
+        // Verify the file actually landed on disk; if it didn't, fail loudly
+        // rather than silently reporting success.
+        const written = statSync(outputPath);
+
+        if (!values.quiet) {
+            const count = normalizeRanges(rawRanges).length;
+            process.stdout.write(
+                [
+                    'coverage-to-markdown: wrote report',
+                    `  input:  ${sourcePath}`,
+                    `  output: ${outputPath}`,
+                    `  ranges: ${count} (from ${rawRanges.length} parsed)`,
+                    `  size:   ${written.size} bytes`,
+                ].join('\n') + '\n'
+            );
+        }
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        process.stderr.write(`${message}\n`);
+        process.stderr.write(`coverage-to-markdown: error: ${message}\n`);
         process.exit(1);
     }
 }
 
 export { parseRanges, normalizeRanges, detectFenceLanguage, buildMarkdown };
 
-const entryArg = process.argv[1];
-const isMain = entryArg !== undefined && import.meta.url === pathToFileURL(entryArg).href;
-if (isMain) {
+if (isMainModule()) {
     main(process.argv.slice(2));
 }
