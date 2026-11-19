@@ -28,14 +28,16 @@
     },
     "keywords": [
         "coverage",
+        "test-coverage",
+        "code-coverage",
         "c8",
         "istanbul",
         "nyc",
         "markdown",
-        "snippet",
-        "report",
-        "cli",
-        "devtools"
+        "uncovered-lines",
+        "line-ranges",
+        "coverage-reporter",
+        "cli"
     ],
     "author": "Albert Bazaleev",
     "license": "MIT",
