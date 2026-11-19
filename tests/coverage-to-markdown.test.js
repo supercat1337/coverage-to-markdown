@@ -6,7 +6,12 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 
-import { parseRanges, buildMarkdown } from '../src/coverage-to-markdown.js';
+import {
+    parseRanges,
+    normalizeRanges,
+    detectFenceLanguage,
+    buildMarkdown,
+} from '../src/coverage-to-markdown.js';
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const cliPath = resolve(moduleDir, '../src/coverage-to-markdown.js');
@@ -78,6 +83,111 @@ describe('parseRanges', () => {
     });
 });
 
+describe('normalizeRanges', () => {
+    it('returns empty array for empty input', () => {
+        assert.deepEqual(normalizeRanges([]), []);
+    });
+
+    it('leaves a single range untouched', () => {
+        assert.deepEqual(normalizeRanges([{ start: 5, end: 10 }]), [{ start: 5, end: 10 }]);
+    });
+
+    it('merges overlapping ranges', () => {
+        assert.deepEqual(
+            normalizeRanges([
+                { start: 5, end: 10 },
+                { start: 8, end: 15 },
+            ]),
+            [{ start: 5, end: 15 }]
+        );
+    });
+
+    it('merges directly adjacent ranges', () => {
+        assert.deepEqual(
+            normalizeRanges([
+                { start: 5, end: 7 },
+                { start: 8, end: 10 },
+            ]),
+            [{ start: 5, end: 10 }]
+        );
+    });
+
+    it('keeps ranges with a gap between them separate', () => {
+        assert.deepEqual(
+            normalizeRanges([
+                { start: 5, end: 7 },
+                { start: 9, end: 10 },
+            ]),
+            [
+                { start: 5, end: 7 },
+                { start: 9, end: 10 },
+            ]
+        );
+    });
+
+    it('sorts unsorted input', () => {
+        assert.deepEqual(
+            normalizeRanges([
+                { start: 20, end: 25 },
+                { start: 1, end: 2 },
+            ]),
+            [
+                { start: 1, end: 2 },
+                { start: 20, end: 25 },
+            ]
+        );
+    });
+
+    it('absorbs a fully contained range', () => {
+        assert.deepEqual(
+            normalizeRanges([
+                { start: 5, end: 20 },
+                { start: 8, end: 10 },
+            ]),
+            [{ start: 5, end: 20 }]
+        );
+    });
+
+    it('merges a chain of overlapping ranges', () => {
+        assert.deepEqual(
+            normalizeRanges([
+                { start: 1, end: 3 },
+                { start: 3, end: 5 },
+                { start: 5, end: 7 },
+            ]),
+            [{ start: 1, end: 7 }]
+        );
+    });
+});
+
+describe('detectFenceLanguage', () => {
+    const cases = [
+        ['file.js', 'js'],
+        ['file.mjs', 'js'],
+        ['file.ts', 'ts'],
+        ['file.tsx', 'tsx'],
+        ['file.py', 'python'],
+        ['file.go', 'go'],
+        ['file.rs', 'rust'],
+        ['file.md', 'markdown'],
+        ['file.yaml', 'yaml'],
+        ['file.toml', 'toml'],
+        ['file.sh', 'bash'],
+        ['/abs/path/file.js', 'js'],
+        ['C:\\foo\\bar.ts', 'ts'],
+        ['FILE.JS', 'js'],
+        ['file.unknownext', ''],
+        ['file', ''],
+        ['.gitignore', ''],
+    ];
+
+    for (const [filePath, expected] of cases) {
+        it(`maps ${filePath} to "${expected}"`, () => {
+            assert.equal(detectFenceLanguage(filePath), expected);
+        });
+    }
+});
+
 describe('buildMarkdown', () => {
     const lines = Array.from({ length: 10 }, (_, i) => `line${i + 1}`);
 
@@ -86,7 +196,7 @@ describe('buildMarkdown', () => {
         assert.match(md, /^# Coverage: file\.js$/m);
     });
 
-    it('renders the absolute source path', () => {
+    it('renders the source path', () => {
         const md = buildMarkdown('/abs/path/file.js', lines, [{ start: 3, end: 4 }]);
         assert.match(md, /Source: `\/abs\/path\/file\.js`/);
     });
@@ -99,28 +209,81 @@ describe('buildMarkdown', () => {
         assert.match(md, /Ranges: 2/);
     });
 
-    it('renders a heading per range', () => {
-        const md = buildMarkdown('/p/f.js', lines, [{ start: 3, end: 4 }]);
-        assert.match(md, /## Range \(3, 4\)/);
+    it('uses the detected fence language', () => {
+        const md = buildMarkdown('/p/f.ts', lines, [{ start: 3, end: 4 }]);
+        assert.match(md, /^```ts$/m);
     });
 
-    it('adds two context lines before and after', () => {
+    it('honors the fence option override', () => {
+        const md = buildMarkdown('/p/f.js', lines, [{ start: 3, end: 4 }], {
+            fence: 'python',
+        });
+        assert.match(md, /^```python$/m);
+    });
+
+    it('honors an empty fence override', () => {
+        const md = buildMarkdown('/p/f.js', lines, [{ start: 3, end: 4 }], {
+            fence: '',
+        });
+        assert.match(md, /^```$/m);
+    });
+
+    it('honors the title option', () => {
+        const md = buildMarkdown('/p/f.js', lines, [{ start: 3, end: 4 }], {
+            title: 'Uncovered @ abc123',
+        });
+        assert.match(md, /^# Uncovered @ abc123$/m);
+    });
+
+    it('adds two context lines by default', () => {
         const md = buildMarkdown('/p/f.js', lines, [{ start: 5, end: 6 }]);
         assert.match(md, /^line3 \/\/ 3$/m);
-        assert.match(md, /^line4 \/\/ 4$/m);
-        assert.match(md, /^line5 \/\/ 5$/m);
-        assert.match(md, /^line6 \/\/ 6$/m);
-        assert.match(md, /^line7 \/\/ 7$/m);
         assert.match(md, /^line8 \/\/ 8$/m);
         assert.doesNotMatch(md, /^line2 \/\/ 2$/m);
         assert.doesNotMatch(md, /^line9 \/\/ 9$/m);
     });
 
+    it('honors contextLines: 0', () => {
+        const md = buildMarkdown('/p/f.js', lines, [{ start: 5, end: 5 }], {
+            contextLines: 0,
+        });
+        assert.match(md, /^line5 \/\/ 5$/m);
+        assert.doesNotMatch(md, /^line4 \/\/ 4$/m);
+        assert.doesNotMatch(md, /^line6 \/\/ 6$/m);
+    });
+
+    it('honors contextLines: 5', () => {
+        const md = buildMarkdown('/p/f.js', lines, [{ start: 5, end: 5 }], {
+            contextLines: 5,
+        });
+        assert.match(md, /^line1 \/\/ 1$/m);
+        assert.match(md, /^line10 \/\/ 10$/m);
+    });
+
+    it('throws on a negative contextLines value', () => {
+        assert.throws(
+            () =>
+                buildMarkdown('/p/f.js', lines, [{ start: 3, end: 4 }], {
+                    contextLines: -1,
+                }),
+            /Invalid contextLines/
+        );
+    });
+
+    it('merges overlapping ranges before rendering', () => {
+        const md = buildMarkdown('/p/f.js', lines, [
+            { start: 3, end: 6 },
+            { start: 5, end: 8 },
+        ]);
+        assert.match(md, /Ranges: 1/);
+        assert.match(md, /## Range \(3, 8\)/);
+        const headings = md.match(/## Range \(/g) ?? [];
+        assert.equal(headings.length, 1);
+    });
+
     it('clamps context at the start of the file', () => {
         const md = buildMarkdown('/p/f.js', lines, [{ start: 1, end: 2 }]);
         assert.match(md, /^line1 \/\/ 1$/m);
-        assert.match(md, /^line2 \/\/ 2$/m);
-        assert.match(md, /^line3 \/\/ 3$/m);
         assert.match(md, /^line4 \/\/ 4$/m);
         assert.doesNotMatch(md, /^line5 \/\/ 5$/m);
     });
@@ -128,7 +291,6 @@ describe('buildMarkdown', () => {
     it('clamps context at the end of the file', () => {
         const md = buildMarkdown('/p/f.js', lines, [{ start: 9, end: 10 }]);
         assert.match(md, /^line8 \/\/ 8$/m);
-        assert.match(md, /^line9 \/\/ 9$/m);
         assert.match(md, /^line10 \/\/ 10$/m);
         assert.doesNotMatch(md, /^line11 /m);
     });
@@ -139,10 +301,33 @@ describe('buildMarkdown', () => {
         assert.match(md, /```js\n```/);
     });
 
-    it('wraps each snippet in a fenced js code block', () => {
-        const md = buildMarkdown('/p/f.js', lines, [{ start: 3, end: 4 }]);
-        const fences = md.match(/```js/g) ?? [];
-        assert.equal(fences.length, 1);
+    it('uses three backticks when the snippet has no backticks', () => {
+        const md = buildMarkdown('/p/f.js', ['alpha', 'beta'], [{ start: 1, end: 2 }]);
+        assert.match(md, /^```js$/m);
+        assert.match(md, /^```$/m);
+    });
+
+    it('grows the fence when the snippet contains triple backticks', () => {
+        const content = ['const a = 1;', 'const md = "```js";', 'const b = 2;', 'const c = 3;'];
+        const md = buildMarkdown('/p/f.js', content, [{ start: 2, end: 2 }], {
+            contextLines: 1,
+        });
+        assert.match(md, /^````js$/m);
+        assert.match(md, /^````$/m);
+    });
+
+    it('grows the fence to match long backtick runs', () => {
+        const content = ['`````', 'next', 'more'];
+        const md = buildMarkdown('/p/f.js', content, [{ start: 1, end: 1 }], {
+            contextLines: 0,
+        });
+        assert.match(md, /^``````js$/m);
+    });
+
+    it('appends the line number to every rendered line', () => {
+        const md = buildMarkdown('/p/f.js', ['alpha', 'beta'], [{ start: 1, end: 2 }]);
+        assert.match(md, /^alpha \/\/ 1$/m);
+        assert.match(md, /^beta \/\/ 2$/m);
     });
 
     it('separates multiple sections with blank lines', () => {
@@ -151,12 +336,6 @@ describe('buildMarkdown', () => {
             { start: 6, end: 6 },
         ]);
         assert.match(md, /## Range \(3, 4\)[\s\S]*\n\n## Range \(6, 6\)/);
-    });
-
-    it('appends the line number to every rendered line', () => {
-        const md = buildMarkdown('/p/f.js', ['alpha', 'beta'], [{ start: 1, end: 2 }]);
-        assert.match(md, /^alpha \/\/ 1$/m);
-        assert.match(md, /^beta \/\/ 2$/m);
     });
 });
 
@@ -171,36 +350,91 @@ describe('CLI', () => {
         rmSync(tmpDir, { recursive: true, force: true });
     });
 
-    it('writes the markdown file for valid input', () => {
+    /**
+     * Run the CLI with the given arguments and return the result.
+     * @param {string[]} args
+     * @returns {import('node:child_process').SpawnSyncReturns<string>}
+     */
+    function run(args) {
+        return spawnSync(process.execPath, [cliPath, ...args], {
+            encoding: 'utf8',
+        });
+    }
+
+    it('writes the markdown file for valid named flags', () => {
         const srcPath = join(tmpDir, 'src.js');
         const outPath = join(tmpDir, 'out.md');
         writeFileSync(srcPath, 'a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n', 'utf8');
 
-        execFileSync(process.execPath, [cliPath, '2-3', srcPath, outPath], { encoding: 'utf8' });
+        const result = run(['--ranges', '2-3', '--input', srcPath, '--output', outPath]);
+        assert.equal(result.status, 0);
 
         const md = readFileSync(outPath, 'utf8');
         assert.match(md, /^# Coverage: src\.js$/m);
         assert.match(md, /## Range \(2, 3\)/);
         assert.match(md, /^a \/\/ 1$/m);
-        assert.match(md, /^b \/\/ 2$/m);
-        assert.match(md, /^c \/\/ 3$/m);
-        assert.match(md, /^d \/\/ 4$/m);
         assert.match(md, /^e \/\/ 5$/m);
         assert.doesNotMatch(md, /^f \/\/ 6$/m);
+        assert.match(md, /^```js$/m);
     });
 
-    it('handles multiple ranges in one call', () => {
+    it('accepts short flags', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        const outPath = join(tmpDir, 'out.md');
+        writeFileSync(srcPath, 'a\nb\nc\n', 'utf8');
+
+        const result = run(['-r', '1', '-i', srcPath, '-o', outPath]);
+        assert.equal(result.status, 0);
+        assert.match(readFileSync(outPath, 'utf8'), /## Range \(1, 1\)/);
+    });
+
+    it('honors -c / --context', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        const outPath = join(tmpDir, 'out.md');
+        const content = Array.from({ length: 10 }, (_, i) => `l${i + 1}`).join('\n') + '\n';
+        writeFileSync(srcPath, content, 'utf8');
+
+        const result = run(['-r', '5', '-i', srcPath, '-o', outPath, '-c', '0']);
+        assert.equal(result.status, 0);
+
+        const md = readFileSync(outPath, 'utf8');
+        assert.match(md, /^l5 \/\/ 5$/m);
+        assert.doesNotMatch(md, /^l4 \/\/ 4$/m);
+        assert.doesNotMatch(md, /^l6 \/\/ 6$/m);
+    });
+
+    it('honors --title', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        const outPath = join(tmpDir, 'out.md');
+        writeFileSync(srcPath, 'a\nb\nc\n', 'utf8');
+
+        const result = run(['-r', '1', '-i', srcPath, '-o', outPath, '--title', 'My Custom Title']);
+        assert.equal(result.status, 0);
+        assert.match(readFileSync(outPath, 'utf8'), /^# My Custom Title$/m);
+    });
+
+    it('honors --fence override', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        const outPath = join(tmpDir, 'out.md');
+        writeFileSync(srcPath, 'a\nb\nc\n', 'utf8');
+
+        const result = run(['-r', '1', '-i', srcPath, '-o', outPath, '--fence', 'python']);
+        assert.equal(result.status, 0);
+        assert.match(readFileSync(outPath, 'utf8'), /^```python$/m);
+    });
+
+    it('merges overlapping ranges from the CLI', () => {
         const srcPath = join(tmpDir, 'src.js');
         const outPath = join(tmpDir, 'out.md');
         const content = Array.from({ length: 20 }, (_, i) => `l${i + 1}`).join('\n') + '\n';
         writeFileSync(srcPath, content, 'utf8');
 
-        execFileSync(process.execPath, [cliPath, '5-6,15', srcPath, outPath], { encoding: 'utf8' });
+        const result = run(['-r', '5-8,7-10', '-i', srcPath, '-o', outPath]);
+        assert.equal(result.status, 0);
 
         const md = readFileSync(outPath, 'utf8');
-        assert.match(md, /## Range \(5, 6\)/);
-        assert.match(md, /## Range \(15, 15\)/);
-        assert.match(md, /Ranges: 2/);
+        assert.match(md, /Ranges: 1/);
+        assert.match(md, /## Range \(5, 10\)/);
     });
 
     it('prints a summary to stdout', () => {
@@ -208,37 +442,165 @@ describe('CLI', () => {
         const outPath = join(tmpDir, 'out.md');
         writeFileSync(srcPath, 'x\n', 'utf8');
 
-        const stdout = execFileSync(process.execPath, [cliPath, '1', srcPath, outPath], {
-            encoding: 'utf8',
-        });
-
-        assert.match(stdout, /Wrote 1 range\(s\)/);
-        assert.match(stdout, /out\.md/);
+        const result = run(['-r', '1', '-i', srcPath, '-o', outPath]);
+        assert.equal(result.status, 0);
+        assert.match(result.stdout, /Wrote 1 range\(s\)/);
+        assert.match(result.stdout, /out\.md/);
     });
 
-    it('exits with code 1 when no args are given', () => {
-        const result = spawnSync(process.execPath, [cliPath], {
-            encoding: 'utf8',
-        });
+    it('prints help with --help and exits 0', () => {
+        const result = run(['--help']);
+        assert.equal(result.status, 0);
+        assert.match(result.stdout, /Usage:/);
+        assert.match(result.stdout, /--ranges/);
+        assert.match(result.stdout, /--input/);
+        assert.match(result.stdout, /--output/);
+        assert.match(result.stdout, /--context/);
+        assert.match(result.stdout, /--title/);
+        assert.match(result.stdout, /--fence/);
+        assert.match(result.stdout, /--force/);
+    });
+
+    it('prints version with --version and exits 0', () => {
+        const result = run(['--version']);
+        assert.equal(result.status, 0);
+        assert.match(result.stdout.trim(), /^\d+\.\d+\.\d+$/);
+    });
+
+    it('rejects missing --ranges', () => {
+        const result = run(['--input', 'a', '--output', 'b']);
         assert.equal(result.status, 1);
-        assert.match(result.stderr, /Usage: coverage-to-markdown/);
+        assert.match(result.stderr, /Missing required argument.*--ranges/);
     });
 
-    it('exits with code 1 when only two args are given', () => {
-        const result = spawnSync(process.execPath, [cliPath, '1-2', 'file.js'], {
-            encoding: 'utf8',
-        });
+    it('rejects missing --input', () => {
+        const result = run(['--ranges', '1', '--output', 'b']);
         assert.equal(result.status, 1);
+        assert.match(result.stderr, /Missing required argument.*--input/);
     });
 
-    it('fails when the source file does not exist', () => {
+    it('rejects missing --output', () => {
+        const result = run(['--ranges', '1', '--input', 'a']);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /Missing required argument.*--output/);
+    });
+
+    it('rejects bare positional arguments', () => {
+        const result = run(['1-2', 'a.js', 'out.md']);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /Unexpected positional argument/);
+    });
+
+    it('rejects a mix of named and positional arguments', () => {
+        const result = run(['--ranges', '1-2', 'a.js', 'out.md']);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /Unexpected positional argument/);
+    });
+
+    it('rejects invalid --context values', () => {
+        const srcPath = join(tmpDir, 'src.js');
         const outPath = join(tmpDir, 'out.md');
-        const result = spawnSync(
-            process.execPath,
-            [cliPath, '1-2', join(tmpDir, 'nope.js'), outPath],
-            { encoding: 'utf8' }
-        );
-        assert.notEqual(result.status, 0);
-        assert.match(result.stderr, /ENOENT|no such file/i);
+        writeFileSync(srcPath, 'x\n', 'utf8');
+
+        const result = run(['-r', '1', '-i', srcPath, '-o', outPath, '-c', 'abc']);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /Invalid --context/);
+    });
+
+    it('rejects unknown options', () => {
+        const result = run(['--ranges', '1', '--input', 'a', '--output', 'b', '--nope']);
+        assert.equal(result.status, 1);
+    });
+
+    it('rejects an empty --ranges string', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        const outPath = join(tmpDir, 'out.md');
+        writeFileSync(srcPath, 'x\n', 'utf8');
+
+        const result = run(['-r', '', '-i', srcPath, '-o', outPath]);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /produced no ranges/);
+    });
+
+    it('rejects invalid range strings without a stack trace', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        const outPath = join(tmpDir, 'out.md');
+        writeFileSync(srcPath, 'x\n', 'utf8');
+
+        const result = run(['-r', '5-2', '-i', srcPath, '-o', outPath]);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /end < start/);
+        assert.doesNotMatch(result.stderr, /\n\s+at /);
+    });
+
+    it('fails when the input file does not exist', () => {
+        const outPath = join(tmpDir, 'out.md');
+        const result = run(['-r', '1-2', '-i', join(tmpDir, 'nope.js'), '-o', outPath]);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /Input file not found/);
+    });
+
+    it('fails when the input path is a directory', () => {
+        const outPath = join(tmpDir, 'out.md');
+        const result = run(['-r', '1-2', '-i', tmpDir, '-o', outPath]);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /not a regular file/);
+    });
+
+    it('refuses to overwrite an existing output file without --force', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        const outPath = join(tmpDir, 'out.md');
+        writeFileSync(srcPath, 'a\nb\nc\n', 'utf8');
+        writeFileSync(outPath, 'KEEP ME', 'utf8');
+
+        const result = run(['-r', '1', '-i', srcPath, '-o', outPath]);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /already exists/);
+        assert.match(result.stderr, /--force/);
+        assert.equal(readFileSync(outPath, 'utf8'), 'KEEP ME');
+    });
+
+    it('overwrites an existing output file when --force is given', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        const outPath = join(tmpDir, 'out.md');
+        writeFileSync(srcPath, 'a\nb\nc\n', 'utf8');
+        writeFileSync(outPath, 'OLD', 'utf8');
+
+        const result = run(['-r', '1', '-i', srcPath, '-o', outPath, '--force']);
+        assert.equal(result.status, 0);
+        const md = readFileSync(outPath, 'utf8');
+        assert.match(md, /^# Coverage: src\.js$/m);
+        assert.notEqual(md, 'OLD');
+    });
+
+    it('rejects when --input and --output resolve to the same path', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        writeFileSync(srcPath, 'a\nb\nc\n', 'utf8');
+
+        const result = run(['-r', '1', '-i', srcPath, '-o', srcPath]);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /different files/);
+        assert.equal(readFileSync(srcPath, 'utf8'), 'a\nb\nc\n');
+    });
+
+    it('rejects when --input and --output resolve to the same path even with --force', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        writeFileSync(srcPath, 'a\nb\nc\n', 'utf8');
+
+        const result = run(['-r', '1', '-i', srcPath, '-o', srcPath, '--force']);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /different files/);
+        assert.equal(readFileSync(srcPath, 'utf8'), 'a\nb\nc\n');
+    });
+
+    it('rejects when --input and --output are lexically different but resolve to the same path', () => {
+        const srcPath = join(tmpDir, 'src.js');
+        writeFileSync(srcPath, 'a\nb\nc\n', 'utf8');
+        const disguised = join(tmpDir, '.', 'src.js');
+
+        const result = run(['-r', '1', '-i', srcPath, '-o', disguised, '--force']);
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /different files/);
+        assert.equal(readFileSync(srcPath, 'utf8'), 'a\nb\nc\n');
     });
 });

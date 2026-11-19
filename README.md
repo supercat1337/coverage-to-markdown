@@ -3,12 +3,13 @@
 Turn a coverage-range string — the kind of line list that `c8`, `nyc`, or
 `istanbul` print when tests don't cover a block — into a Markdown document
 with copy-pasteable code snippets. For every uncovered block the tool
-pulls the code together with **two context lines before and after**, and
-appends an inline `// <lineNumber>` comment so the snippet is easy to
-reference in a review comment, a ticket, or an LLM prompt.
+pulls the code together with configurable **context lines** before and
+after, **appends an inline `// <lineNumber>` comment**, and picks a
+**safe fence** so that backticks inside the source code never break the
+Markdown.
 
 ```text
-$ cov2md "176-181,258-270" ./src/index.js ./coverage.md
+$ cov2md --ranges "176-181,258-270" --input ./src/index.js --output ./coverage.md
 Wrote 2 range(s) from /abs/path/src/index.js to /abs/path/coverage.md
 ```
 
@@ -21,7 +22,7 @@ usually end up doing this by hand:
 2. Copy the offending line numbers.
 3. Open the file, find each block, copy it, note the line numbers.
 
-This package does steps 2–3 for you, and produces a stable Markdown
+This package does steps 2–3 for you and produces a stable Markdown
 artifact you can attach to a PR, an issue, or a chat message.
 
 ## Install
@@ -39,30 +40,68 @@ npm i -D @supercat1337/coverage-to-markdown
 ```
 
 Requires Node.js **18 or newer**. The package has **zero runtime
-dependencies** — everything is built on `node:fs`, `node:path`, and
-`node:url`.
+dependencies** — everything is built on `node:fs`, `node:path`,
+`node:url`, and `node:util`.
 
 ## CLI
 
 Both `coverage-to-markdown` and the shorter `cov2md` alias point to the
-same script after a global install. The argument order is:
+same script after a global install.
 
 ```text
-coverage-to-markdown <ranges> <source-file> <output-md>
+coverage-to-markdown --ranges <ranges> --input <source-file> --output <output-md> [options]
 ```
 
-### Example
+### Why named arguments only
+
+All three main arguments are **required named flags**. There is no
+positional form, and any leftover positional argument is rejected with a
+non-zero exit code. This is deliberate: with positional arguments, a
+forgotten or reordered argument can silently point `--output` at the
+input file, and the source file is overwritten before you notice.
+
+The tool also refuses to write over an existing file unless `--force`
+is passed, and rejects a run where `--input` and `--output` resolve to
+the same path.
+
+### Options
+
+| Flag                | Short | Required | Description                                  | Default                 |
+| ------------------- | ----- | -------- | -------------------------------------------- | ----------------------- |
+| `--ranges <ranges>` | `-r`  | yes      | Comma-separated line ranges                  |                         |
+| `--input <path>`    | `-i`  | yes      | Source file to extract lines from            |                         |
+| `--output <path>`   | `-o`  | yes      | Markdown file to write                       |                         |
+| `--context <n>`     | `-c`  |          | Lines of context before and after each range | `2`                     |
+| `--title <s>`       | `-t`  |          | Top-level heading text                       | `Coverage: <basename>`  |
+| `--fence <lang>`    |       |          | Override fence language                      | Detected from extension |
+| `--force`           | `-f`  |          | Overwrite the output file if it exists       | off                     |
+| `--help`            | `-h`  |          | Show usage and exit                          |                         |
+| `--version`         | `-v`  |          | Print the version and exit                   |                         |
+
+### Examples
 
 ```bash
-cov2md "176-181,258-270,286-287,305,338-344" \
-    ./src/index.js \
-    ./coverage.md
+# Default context of two lines
+cov2md \
+    --ranges "176-181,258-270,286-287" \
+    --input ./src/index.js \
+    --output ./coverage.md
+
+# Ten lines of context, custom heading
+cov2md -c 10 -t "Uncovered @ abc123" \
+    -r "176-181" -i ./src/index.js -o ./cov.md
+
+# Force Python highlighting for a file with an unknown extension
+cov2md --fence python -r "10-20" -i ./script -o ./cov.md
+
+# Overwrite an existing output file on purpose
+cov2md -r "1-5" -i ./src/index.js -o ./existing.md --force
 ```
 
 ### Ranges format
 
 Comma-separated segments; each segment is either `x-y` (inclusive) or a
-single line `x`.
+single line `x`:
 
 ```text
 176-181,258-270,286-287,305,338-344
@@ -72,23 +111,28 @@ Rules:
 
 - Whitespace around segments is ignored.
 - Empty segments (`,,`) are silently dropped.
+- **Overlapping and directly adjacent ranges are merged.** `5-7,8-10`
+  becomes a single `5-10` block. Coverage tools occasionally report
+  overlapping blocks, and rendering them separately duplicates the same
+  code.
 - Invalid segments (non-numeric, `end < start`, zero, negative) throw a
   descriptive error before any file is written.
 
 ### Output format
 
-The document has one top-level heading with the source file's basename,
-then one `## Range (start, end)` section per coverage segment. Each
-section contains a fenced `js` code block with lines from `start - 2`
-through `end + 2`, clamped to the file bounds, and each line suffixed
-with `// <lineNumber>`.
+The document has one top-level heading (customisable via `--title`),
+then one `## Range (start, end)` section per normalised range. Each
+section contains a fenced code block with the language inferred from
+the file extension, lines from `start - contextLines` through
+`end + contextLines` (clamped to the file bounds), and each line
+suffixed with `// <lineNumber>`.
 
 ````markdown
 # Coverage: index.js
 
 Source: `/abs/path/src/index.js`
 
-Ranges: 2
+Ranges: 1
 
 ## Range (176, 181)
 
@@ -103,23 +147,52 @@ Ranges: 2
 } // 181
 // (context after) // 182
 ```
-````
 
-````
+### Fence language
+
+The fence language is detected from the source file extension:
+`.js` → `js`, `.ts` → `ts`, `.tsx` → `tsx`, `.py` → `python`,
+`.go` → `go`, `.rs` → `rust`, `.md` → `markdown`, and so on. Unknown
+extensions fall back to a bare fence. Override with `--fence <lang>` or
+pass `--fence ""` to disable highlighting entirely.
+
+### Fence length
+
+If a snippet contains backtick runs, the fence automatically grows to be
+one backtick longer than the longest run inside the block. Source code
+containing literal ` ``` ` (for example, Markdown fixtures or shell
+scripts that print fences) will not break the rendered document.
+
+## Safety guarantees
+
+- **Named arguments only.** A stray positional argument is a hard error.
+- **No silent overwrites.** An existing `--output` file is left intact
+  unless `--force` is given.
+- **No input/output collision.** `--input` and `--output` that resolve
+  to the same file are rejected, even with `--force`.
+- **Pre-flight validation.** `--input` must exist and be a regular file;
+  `--ranges` must yield at least one range; all checks run before any
+  file is opened for writing.
+- **Clean errors.** Failures print a single message to stderr and exit
+  with code `1` — no stack traces.
 
 ## Programmatic API
 
 ```js
 import {
     parseRanges,
+    normalizeRanges,
+    detectFenceLanguage,
     buildMarkdown,
 } from '@supercat1337/coverage-to-markdown';
+```
 ````
 
 ### `parseRanges(input: string): Range[]`
 
-Parses a coverage-range string into an array of `{ start, end }` objects.
-Throws on invalid input.
+Pure parser: splits a range string into `{ start, end }` objects.
+Throws on invalid input. Does **not** merge overlapping or adjacent
+ranges — that's `normalizeRanges`'s job.
 
 ```js
 parseRanges('176-181,305');
@@ -129,11 +202,44 @@ parseRanges('176-181,305');
 //    ]
 ```
 
-### `buildMarkdown(sourcePath: string, lines: string[], ranges: Range[]): string`
+### `normalizeRanges(ranges: Range[]): Range[]`
 
-Builds the Markdown document from a pre-split lines array. Useful when
-you already have the file content in memory or want to feed synthetic
-lines in tests.
+Sorts ranges by start and merges overlapping or directly adjacent ones.
+
+```js
+normalizeRanges([
+    { start: 5, end: 7 },
+    { start: 8, end: 10 },
+    { start: 15, end: 15 },
+]);
+// => [
+//      { start: 5, end: 10 },
+//      { start: 15, end: 15 },
+//    ]
+```
+
+### `detectFenceLanguage(filePath: string): string`
+
+Maps a file extension to a Markdown fence language identifier. Returns
+an empty string for unknown extensions or dotfiles. Handles Windows
+paths and is case-insensitive.
+
+```js
+detectFenceLanguage('/abs/path/file.ts'); // => 'ts'
+detectFenceLanguage('C:\\foo\\bar.py'); // => 'python'
+detectFenceLanguage('file.unknownext'); // => ''
+```
+
+### `buildMarkdown(sourcePath, lines, ranges, options?): string`
+
+Builds the Markdown document. Normalizes ranges internally before
+rendering, so overlapping input produces a single merged section.
+
+`options` (all optional):
+
+- `contextLines?: number` — lines of context before and after each range (default `2`).
+- `title?: string` — top-level heading text (default `Coverage: <basename>`).
+- `fence?: string` — fence language override. Pass `''` to disable highlighting.
 
 ```js
 import { readFileSync } from 'node:fs';
@@ -141,17 +247,26 @@ import { parseRanges, buildMarkdown } from '@supercat1337/coverage-to-markdown';
 
 const content = readFileSync('./src/index.js', 'utf8');
 const lines = content.split('\n').map(line => line.replace(/\r$/, ''));
-const md = buildMarkdown('./src/index.js', lines, parseRanges('10-12,20'));
+const md = buildMarkdown('./src/index.js', lines, parseRanges('10-12,20'), {
+    contextLines: 5,
+    title: 'My review notes',
+});
 ```
 
 ### Types
 
-The public `Range` type is declared in `src/types.d.ts`:
+Public types live in `src/types.d.ts`:
 
 ```ts
 export interface Range {
     start: number;
     end: number;
+}
+
+export interface BuildOptions {
+    contextLines?: number;
+    title?: string;
+    fence?: string;
 }
 ```
 
@@ -163,17 +278,7 @@ export interface Range {
 npx c8 --reporter=text --reporter=json-summary npm test
 ```
 
-Parse the JSON summary to get `lines.uncovered`, feed it to the CLI:
-
-```bash
-node -e '
-    const s = require("./coverage/coverage-summary.json");
-    const uncovered = s.total.lines.uncovered;
-    // uncovered is a count, not ranges — you still need the per-file report
-'
-```
-
-`c8` doesn't emit per-line ranges as a single string. The simplest
+`c8` doesn't emit per-line ranges as a single string, so the common
 workflow is: open the HTML report, copy the offending line numbers, and
 pass them to `cov2md`.
 
@@ -183,8 +288,8 @@ pass them to `cov2md`.
 npx nyc --reporter=json npm test
 ```
 
-The per-file JSON report contains a `statementMap` / `fnMap` / `branchMap`
-that you can diff against `s` / `f` / `b` counts to derive uncovered
+The per-file JSON report contains `statementMap` / `fnMap` / `branchMap`
+that you can diff against the `s` / `f` / `b` counts to derive uncovered
 lines, then join them into a range string and hand it over.
 
 ## Limitations
@@ -192,12 +297,10 @@ lines, then join them into a range string and hand it over.
 - **Multi-line template literals:** the inline `// <n>` comment is
   appended as plain text. If a snippet lands inside a multi-line
   template literal, the comment becomes part of the string value.
-  Consider excluding such files from coverage reports or slicing them
-  manually.
 - **CRLF:** trailing `\r` characters are stripped before the line-number
   comment is appended, so Windows-formatted files render correctly.
 - **Out-of-bounds ranges:** a range that starts after the end of the
-  file produces an empty snippet rather than an error. This matches
+  file produces an empty fence rather than an error. This matches
   coverage tools that occasionally report phantom lines.
 
 ## License

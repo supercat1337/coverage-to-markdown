@@ -1,7 +1,7 @@
 {
     "name": "@supercat1337/coverage-to-markdown",
     "version": "1.0.0",
-    "description": "Convert coverage ranges into markdown snippets with line numbers and surrounding context lines.",
+    "description": "Convert coverage ranges into markdown snippets with line numbers, surrounding context lines, and automatic fence language detection.",
     "type": "module",
     "bin": {
         "coverage-to-markdown": "./src/coverage-to-markdown.js",
