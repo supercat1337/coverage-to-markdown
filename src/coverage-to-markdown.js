@@ -1,31 +1,26 @@
 #!/usr/bin/env node
-
-// @ts-check
-
 /**
  * Coverage-to-markdown utility.
  *
  * Reads a source file and a coverage range string like
  * "176-181,258-270,305" and writes a markdown document where each range
  * is rendered as a fenced code block with configurable context lines
- * around it, and each line gets an inline "// <lineNumber>" comment.
- *
- * All CLI arguments are named flags. There is no positional form on
- * purpose: a missing or misplaced positional argument could otherwise
- * silently point the output at the input file and overwrite it.
+ * around it, an R-label, and uncovered lines marked according to the
+ * `highlight` option.
  *
  * The fence language is inferred from the source file extension, and the
  * fence length grows automatically when the snippet contains backtick
  * runs so that markdown fences never break.
  */
 import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, extname, resolve } from 'node:path';
+import { dirname, extname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 /**
  * @typedef {import('./types.js').Range} Range
  * @typedef {import('./types.js').BuildOptions} BuildOptions
+ * @typedef {import('./types.js').HighlightMode} HighlightMode
  */
 
 /** @type {number} */
@@ -33,6 +28,9 @@ const DEFAULT_CONTEXT_LINES = 2;
 
 /** @type {number} */
 const MIN_FENCE_LENGTH = 3;
+
+/** @type {HighlightMode[]} */
+const VALID_HIGHLIGHTS = ['none', 'comment', 'gutter'];
 
 /**
  * File extension to markdown fence language identifier.
@@ -103,6 +101,9 @@ Options:
   -c, --context <n>       Lines of context before and after each range (default: 2)
   -t, --title <s>         Top-level heading text (default: "Coverage: <basename>")
       --fence <lang>      Override fence language (default: from file extension)
+      --highlight <mode>  Marker for uncovered lines: none | comment | gutter (default: comment)
+      --command <cmd>     Add a "Reproduce:" line with the given command
+      --absolute-path     Print the source path as absolute (default: relative to cwd)
   -f, --force             Overwrite the output file if it already exists
   -q, --quiet             Suppress the success summary on stdout
   -h, --help              Show this help and exit
@@ -118,13 +119,12 @@ Examples:
   coverage-to-markdown --ranges "176-181,258-270" --input ./src/index.js --output ./coverage.md
   coverage-to-markdown -r "10-20" -i ./src/util.ts -o ./ctx.md -c 5
   coverage-to-markdown -r "1-5" -i ./src/index.js -o ./existing.md --force
+  coverage-to-markdown -r "10-20" -i ./src/client.js -o ./cov.md \\
+      --highlight gutter --command "npm test && npx c8 report"
 `;
 
 /**
  * Parse a coverage range string into an array of ranges.
- * Accepts comma-separated segments in the form "x-y" or "x".
- * Does not merge overlapping or adjacent ranges — use {@link normalizeRanges}
- * for that.
  * @param {string} input
  * @returns {Range[]}
  */
@@ -137,7 +137,6 @@ function parseRanges(input) {
 }
 
 /**
- * Parse a single segment of form "x-y" or "x" into a Range.
  * @param {string} segment
  * @returns {Range}
  */
@@ -156,7 +155,6 @@ function parseRangeSegment(segment) {
 }
 
 /**
- * Parse a positive integer line number.
  * @param {string} raw
  * @returns {number}
  */
@@ -170,7 +168,6 @@ function parseLineNumber(raw) {
 
 /**
  * Sort ranges and merge overlapping or directly adjacent ones.
- * For example, `[5-7, 8-10, 12-14]` becomes `[5-10, 12-14]`.
  * @param {Range[]} ranges
  * @returns {Range[]}
  */
@@ -195,8 +192,6 @@ function normalizeRanges(ranges) {
 }
 
 /**
- * Detect the markdown fence language from a file path extension.
- * Returns an empty string for unknown extensions or dotfiles.
  * @param {string} filePath
  * @returns {string}
  */
@@ -207,9 +202,6 @@ function detectFenceLanguage(filePath) {
 }
 
 /**
- * Compute the fence length needed so the snippet never breaks the fence.
- * Scans the snippet lines for backtick runs and returns `maxRun + 1`,
- * clamped to a minimum of three backticks.
  * @param {string[]} lines
  * @param {number} start
  * @param {number} end
@@ -234,7 +226,6 @@ function pickFenceLength(lines, start, end) {
 }
 
 /**
- * Split file content into lines, stripping trailing CR characters.
  * @param {string} content
  * @returns {string[]}
  */
@@ -243,39 +234,108 @@ function splitLines(content) {
 }
 
 /**
- * Compute the 1-based snippet boundaries for a range, clamped to file size.
  * @param {string[]} lines
  * @param {Range} range
  * @param {number} contextLines
  * @returns {{ start: number, end: number }}
  */
 function snippetBounds(lines, range, contextLines) {
-    const total = lines.length;
     return {
         start: Math.max(1, range.start - contextLines),
-        end: Math.min(total, range.end + contextLines),
+        end: Math.min(lines.length, range.end + contextLines),
     };
 }
 
 /**
- * Render snippet lines with `// <lineNumber>` suffixes.
- * @param {string[]} lines
- * @param {number} start
- * @param {number} end
+ * Format a range as a heading label: "line 56" or "lines 111–112".
+ * Uses an en-dash between range endpoints.
+ * @param {Range} range
  * @returns {string}
  */
-function renderSnippet(lines, start, end) {
+function formatRangeLabel(range) {
+    if (range.start === range.end) {
+        return `line ${range.start}`;
+    }
+    return `lines ${range.start}–${range.end}`;
+}
+
+/**
+ * Render snippet in `none` mode: every line gets `// <n>`, no marker.
+ * @param {string[]} lines
+ * @param {number} snippetStart
+ * @param {number} snippetEnd
+ * @returns {string}
+ */
+function renderSnippetNone(lines, snippetStart, snippetEnd) {
     const parts = [];
-    for (let n = start; n <= end; n += 1) {
+    for (let n = snippetStart; n <= snippetEnd; n += 1) {
         parts.push(`${lines[n - 1] ?? ''} // ${n}`);
     }
     return parts.join('\n');
 }
 
 /**
+ * Render snippet in `comment` mode: context lines get `// <n>`,
+ * uncovered lines get `// <n> ← UNCOVERED`.
+ * @param {string[]} lines
+ * @param {Range} range
+ * @param {number} snippetStart
+ * @param {number} snippetEnd
+ * @returns {string}
+ */
+function renderSnippetComment(lines, range, snippetStart, snippetEnd) {
+    const parts = [];
+    for (let n = snippetStart; n <= snippetEnd; n += 1) {
+        const isUncovered = n >= range.start && n <= range.end;
+        const marker = isUncovered ? ' ← UNCOVERED' : '';
+        parts.push(`${lines[n - 1] ?? ''} // ${n}${marker}`);
+    }
+    return parts.join('\n');
+}
+
+/**
+ * Render snippet in `gutter` mode: line number on the left with `│`
+ * separator, `>` for uncovered lines. Line numbers are right-aligned
+ * to the width of the largest number in the snippet.
+ * @param {string[]} lines
+ * @param {Range} range
+ * @param {number} snippetStart
+ * @param {number} snippetEnd
+ * @returns {string}
+ */
+function renderSnippetGutter(lines, range, snippetStart, snippetEnd) {
+    const width = String(snippetEnd).length;
+    const parts = [];
+    for (let n = snippetStart; n <= snippetEnd; n += 1) {
+        const isUncovered = n >= range.start && n <= range.end;
+        const prefix = isUncovered ? '> ' : '  ';
+        const padded = String(n).padStart(width, ' ');
+        parts.push(`${prefix}${padded} │ ${lines[n - 1] ?? ''}`);
+    }
+    return parts.join('\n');
+}
+
+/**
+ * Dispatch to the correct snippet renderer.
+ * @param {string[]} lines
+ * @param {Range} range
+ * @param {number} snippetStart
+ * @param {number} snippetEnd
+ * @param {HighlightMode} highlight
+ * @returns {string}
+ */
+function renderSnippet(lines, range, snippetStart, snippetEnd, highlight) {
+    if (highlight === 'gutter') {
+        return renderSnippetGutter(lines, range, snippetStart, snippetEnd);
+    }
+    if (highlight === 'none') {
+        return renderSnippetNone(lines, snippetStart, snippetEnd);
+    }
+    return renderSnippetComment(lines, range, snippetStart, snippetEnd);
+}
+
+/**
  * Build the markdown document body for all ranges.
- * Input ranges are normalized (overlapping and adjacent ranges merged)
- * before rendering.
  * @param {string} sourcePath
  * @param {string[]} lines
  * @param {Range[]} ranges
@@ -288,23 +348,39 @@ function buildMarkdown(sourcePath, lines, ranges, options = {}) {
         throw new Error(`Invalid contextLines: ${contextLines}`);
     }
 
+    const highlight = options.highlight ?? 'comment';
+    if (!VALID_HIGHLIGHTS.includes(highlight)) {
+        throw new Error(
+            `Invalid highlight mode: "${highlight}". ` +
+                `Expected one of: ${VALID_HIGHLIGHTS.join(', ')}.`
+        );
+    }
+
     const normalized = normalizeRanges(ranges);
     const title = options.title ?? `Coverage: ${basenameOf(sourcePath)}`;
     const fenceLang = options.fence !== undefined ? options.fence : detectFenceLanguage(sourcePath);
 
-    const header = [
-        `# ${title}`,
-        '',
-        `Source: \`${sourcePath}\``,
-        '',
-        `Ranges: ${normalized.length}`,
-    ].join('\n');
+    const headerLines = [`# ${title}`, '', `Source: \`${sourcePath}\``];
 
-    const sections = normalized.map(range => {
+    if (typeof options.command === 'string' && options.command.length > 0) {
+        const safeCommand = options.command.replace(/`/g, "'").replace(/\r?\n/g, ' ');
+        headerLines.push(`Reproduce: \`${safeCommand}\``);
+    }
+
+    headerLines.push('');
+
+    const count = normalized.length;
+    const noun = count === 1 ? 'range' : 'ranges';
+    headerLines.push(`${count} ${noun} · one contiguous uncovered block each · sorted by line`);
+    headerLines.push('Labels R1..RN are assigned per run and may change when lines shift.');
+
+    const header = headerLines.join('\n');
+
+    const sections = normalized.map((range, index) => {
         const bounds = snippetBounds(lines, range, contextLines);
         const fenceLength = pickFenceLength(lines, bounds.start, bounds.end);
         const fence = '`'.repeat(fenceLength);
-        const snippet = renderSnippet(lines, bounds.start, bounds.end);
+        const snippet = renderSnippet(lines, range, bounds.start, bounds.end, highlight);
 
         const block = [`${fence}${fenceLang}`];
         if (snippet.length > 0) {
@@ -312,7 +388,7 @@ function buildMarkdown(sourcePath, lines, ranges, options = {}) {
         }
         block.push(fence);
 
-        return [`## Range (${range.start}, ${range.end})`, '', ...block].join('\n');
+        return [`## R${index + 1} · ${formatRangeLabel(range)}`, '', ...block].join('\n');
     });
 
     return [header, ...sections].join('\n\n') + '\n';
@@ -330,6 +406,20 @@ function basenameOf(filePath) {
 }
 
 /**
+ * Return a display form of `absPath`: relative to cwd with forward
+ * slashes when possible, otherwise the original absolute path.
+ * @param {string} absPath
+ * @returns {string}
+ */
+function toRelativeDisplay(absPath) {
+    const rel = relative(process.cwd(), absPath);
+    if (rel === '' || isAbsolute(rel)) {
+        return absPath;
+    }
+    return rel.replace(/\\/g, '/');
+}
+
+/**
  * Read the package version from package.json.
  * @returns {string}
  */
@@ -340,7 +430,6 @@ function readVersion() {
 }
 
 /**
- * Parse and validate the `--context` option value.
  * @param {string} raw
  * @returns {number}
  */
@@ -353,9 +442,20 @@ function parseContextOption(raw) {
 }
 
 /**
- * Reject positional arguments passed to the CLI.
- * Named arguments are mandatory so that a forgotten flag cannot shift
- * paths around and overwrite the input file with output.
+ * @param {string} raw
+ * @returns {HighlightMode}
+ */
+function parseHighlightOption(raw) {
+    if (!VALID_HIGHLIGHTS.includes(raw)) {
+        throw new Error(
+            `Invalid --highlight value: "${raw}". ` +
+                `Expected one of: ${VALID_HIGHLIGHTS.join(', ')}.`
+        );
+    }
+    return /** @type {HighlightMode} */ (raw);
+}
+
+/**
  * @param {string[]} positionals
  * @returns {void}
  */
@@ -370,21 +470,14 @@ function rejectPositionals(positionals) {
 }
 
 /**
- * Ensure every required flag is present.
  * @param {Record<string, unknown>} values
  * @returns {{ ranges: string, input: string, output: string }}
  */
 function readRequiredFlags(values) {
     const missing = [];
-    if (values.ranges === undefined) {
-        missing.push('--ranges');
-    }
-    if (values.input === undefined) {
-        missing.push('--input');
-    }
-    if (values.output === undefined) {
-        missing.push('--output');
-    }
+    if (values.ranges === undefined) missing.push('--ranges');
+    if (values.input === undefined) missing.push('--input');
+    if (values.output === undefined) missing.push('--output');
     if (missing.length > 0) {
         throw new Error(
             `Missing required argument(s): ${missing.join(', ')}. ` + 'Run with --help for usage.'
@@ -399,9 +492,9 @@ function readRequiredFlags(values) {
 
 /**
  * Validate input and output paths before any file is written.
- * @param {string} sourcePath absolute path to the source file
- * @param {string} outputPath absolute path to the output file
- * @param {boolean} force whether --force was passed
+ * @param {string} sourcePath
+ * @param {string} outputPath
+ * @param {boolean} force
  * @returns {void}
  */
 function guardFilePaths(sourcePath, outputPath, force) {
@@ -426,12 +519,10 @@ function guardFilePaths(sourcePath, outputPath, force) {
 
 /**
  * Check whether the current module was started as the main script.
- *
  * Compares real (symlink-resolved) paths instead of file URLs, because
  * on Windows process.argv[1] and import.meta.url can disagree on drive
- * letter case, on short (8.3) names, and on whether junctions are
- * resolved when the script is launched through an npm bin shim — the
- * exact setup that `npm link` produces.
+ * letter case, on short (8.3) names, and on junction resolution when
+ * launched through an npm bin shim (`npm link`).
  * @returns {boolean}
  */
 function isMainModule() {
@@ -468,8 +559,11 @@ function main(argv) {
                 context: { type: 'string', short: 'c' },
                 title: { type: 'string', short: 't' },
                 fence: { type: 'string' },
+                highlight: { type: 'string' },
+                command: { type: 'string' },
                 force: { type: 'boolean', short: 'f' },
                 quiet: { type: 'boolean', short: 'q' },
+                'absolute-path': { type: 'boolean' },
                 help: { type: 'boolean', short: 'h' },
                 version: { type: 'boolean', short: 'v' },
             },
@@ -492,6 +586,8 @@ function main(argv) {
             values.context !== undefined
                 ? parseContextOption(values.context)
                 : DEFAULT_CONTEXT_LINES;
+        const highlight =
+            values.highlight !== undefined ? parseHighlightOption(values.highlight) : 'comment';
 
         const sourcePath = resolve(flags.input);
         const outputPath = resolve(flags.output);
@@ -513,16 +609,18 @@ function main(argv) {
         const content = readFileSync(sourcePath, 'utf8');
         const lines = splitLines(content);
 
-        const markdown = buildMarkdown(sourcePath, lines, rawRanges, {
+        const displayPath =
+            values['absolute-path'] === true ? sourcePath : toRelativeDisplay(sourcePath);
+
+        const markdown = buildMarkdown(displayPath, lines, rawRanges, {
             contextLines,
+            highlight,
             title: values.title,
             fence: values.fence,
+            command: values.command,
         });
 
         writeFileSync(outputPath, markdown, 'utf8');
-
-        // Verify the file actually landed on disk; if it didn't, fail loudly
-        // rather than silently reporting success.
         const written = statSync(outputPath);
 
         if (!values.quiet) {

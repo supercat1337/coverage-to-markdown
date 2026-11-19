@@ -66,17 +66,21 @@ the same path.
 
 ### Options
 
-| Flag                | Short | Required | Description                                  | Default                 |
-| ------------------- | ----- | -------- | -------------------------------------------- | ----------------------- |
-| `--ranges <ranges>` | `-r`  | yes      | Comma-separated line ranges                  |                         |
-| `--input <path>`    | `-i`  | yes      | Source file to extract lines from            |                         |
-| `--output <path>`   | `-o`  | yes      | Markdown file to write                       |                         |
-| `--context <n>`     | `-c`  |          | Lines of context before and after each range | `2`                     |
-| `--title <s>`       | `-t`  |          | Top-level heading text                       | `Coverage: <basename>`  |
-| `--fence <lang>`    |       |          | Override fence language                      | Detected from extension |
-| `--force`           | `-f`  |          | Overwrite the output file if it exists       | off                     |
-| `--help`            | `-h`  |          | Show usage and exit                          |                         |
-| `--version`         | `-v`  |          | Print the version and exit                   |                         |
+| Flag | Short | Required | Description | Default |
+| --- | --- | --- | --- | --- |
+| `--ranges <ranges>` | `-r` | yes | Comma-separated line ranges | |
+| `--input <path>` | `-i` | yes | Source file to extract lines from | |
+| `--output <path>` | `-o` | yes | Markdown file to write | |
+| `--context <n>` | `-c` | | Lines of context before and after each range | `2` |
+| `--title <s>` | `-t` | | Top-level heading text | `Coverage: <basename>` |
+| `--fence <lang>` | | | Override fence language | Detected from extension |
+| `--highlight <mode>` | | | Uncovered marker: `none`, `comment`, `gutter` | `comment` |
+| `--command <cmd>` | | | Add a `Reproduce:` line to the header | |
+| `--absolute-path` | | | Print the source path as absolute | off (relative) |
+| `--force` | `-f` | | Overwrite the output file if it exists | off |
+| `--quiet` | `-q` | | Suppress the success summary | off |
+| `--help` | `-h` | | Show usage and exit | |
+| `--version` | `-v` | | Print the version and exit | |
 
 ### Examples
 
@@ -91,12 +95,87 @@ cov2md \
 cov2md -c 10 -t "Uncovered @ abc123" \
     -r "176-181" -i ./src/index.js -o ./cov.md
 
+# Diff-style gutter, with a reproduce hint
+cov2md -r "10-20" -i ./src/client.js -o ./cov.md \
+    --highlight gutter \
+    --command "npm test && npx c8 report --reporter=text"
+
 # Force Python highlighting for a file with an unknown extension
 cov2md --fence python -r "10-20" -i ./script -o ./cov.md
 
 # Overwrite an existing output file on purpose
 cov2md -r "1-5" -i ./src/index.js -o ./existing.md --force
 ```
+
+### Output format
+
+The document has one top-level heading (customisable via `--title`),
+a short metadata block, then one `## R1 · line 56` or
+`## R1 · lines 111–112` section per normalised range. Each section
+contains a fenced code block with the language inferred from the file
+extension, lines from `start - contextLines` through
+`end + contextLines` (clamped to the file bounds), and markers on
+uncovered lines (controlled by `--highlight`).
+
+The metadata block looks like this:
+
+```text
+Source: `src/client.js`
+Reproduce: `npm test && npx c8 report`
+
+3 ranges · one contiguous uncovered block each · sorted by line
+Labels R1..RN are assigned per run and may change when lines shift.
+```
+
+- **`Source:`** is the input path. By default it is printed **relative to
+  the current working directory** with forward slashes, so it is portable
+  across machines and does not leak local file-system structure. Use
+  `--absolute-path` to print the absolute path instead.
+- **`Reproduce:`** appears only when `--command` is given. Backticks and
+  newlines inside the command are replaced with single quotes and spaces
+  respectively to keep the Markdown valid.
+- **`N range(s) · …`** states the count and the range convention.
+- **`Labels R1..RN …`** warns that section labels are per-run and should
+  not be treated as stable references across regenerations.
+
+### Highlight modes
+
+`--highlight` controls how uncovered lines are marked inside each
+snippet.
+
+`comment` (default) keeps every line copy-pasteable and appends a marker
+to the trailing line-number comment on uncovered lines:
+
+```js
+    const pattern = ... // 174
+    const entries = ... // 175
+    for (const item of entries) { // 176 ← UNCOVERED
+        if (!item) continue; // 177 ← UNCOVERED
+        total += item.weight; // 178 ← UNCOVERED
+    } // 179 ← UNCOVERED
+    return total; // 180 ← UNCOVERED
+} // 181 ← UNCOVERED
+```
+
+`gutter` moves the line number to the left, right-aligns it, and uses
+`>` for uncovered lines. Reads like a diff, but the snippet is no longer
+directly pasteable into an editor:
+
+```js
+  174 │     const pattern = ...
+  175 │     const entries = ...
+> 176 │     for (const item of entries) {
+> 177 │         if (!item) continue;
+> 178 │         total += item.weight;
+> 179 │     }
+> 180 │     return total;
+> 181 │ }
+  182 │ // (context after)
+```
+
+`none` produces the pre-2.1 snippet format: `// <n>` comments on every
+line, no uncovered marker. Useful when downstream tooling parses the
+snippet and does not expect a marker.
 
 ### Ranges format
 
