@@ -1,0 +1,54 @@
+{
+    "name": "@supercat1337/coverage-to-markdown",
+    "version": "1.0.0",
+    "description": "Convert coverage ranges into markdown snippets with line numbers and surrounding context lines.",
+    "type": "module",
+    "bin": {
+        "coverage-to-markdown": "./src/coverage-to-markdown.js",
+        "cov2md": "./src/coverage-to-markdown.js"
+    },
+    "main": "./src/coverage-to-markdown.js",
+    "exports": {
+        ".": {
+            "types": "./src/types.d.ts",
+            "default": "./src/coverage-to-markdown.js"
+        }
+    },
+    "engines": {
+        "node": ">=18"
+    },
+    "files": [
+        "src/"
+    ],
+    "scripts": {
+        "start": "node ./src/coverage-to-markdown.js",
+        "test": "node --test",
+        "lint": "eslint .",
+        "prepublishOnly": "npm test && npm run lint"
+    },
+    "keywords": [
+        "coverage",
+        "c8",
+        "istanbul",
+        "nyc",
+        "markdown",
+        "snippet",
+        "report",
+        "cli",
+        "devtools"
+    ],
+    "author": "Albert Bazaleev",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/supercat1337/coverage-to-markdown.git"
+    },
+    "bugs": {
+        "url": "https://github.com/supercat1337/coverage-to-markdown/issues"
+    },
+    "homepage": "https://github.com/supercat1337/coverage-to-markdown#readme",
+    "dependencies": {},
+    "devDependencies": {
+        "eslint-plugin-jsdoc": "^63.3.3"
+    }
+}
