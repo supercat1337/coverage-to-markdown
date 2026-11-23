@@ -1,0 +1,16 @@
+{
+    "all": true,
+    "src": ["src"],
+    "include": ["src/**/*.js"],
+    "exclude": ["**/*.test.js", "tests/**", "src/cov2md/types.js", "src/json-report/types.js"],
+    "reporter": ["text", "text-summary", "json", "html", "lcov"],
+    "report-dir": "coverage",
+    "temp-directory": "./node_modules/.cache/c8-tmp",
+    "clean": true,
+    "exclude-after-remap": true,
+    "checkCoverage": true,
+    "lines": 98,
+    "statements": 98,
+    "functions": 100,
+    "branches": 90
+}

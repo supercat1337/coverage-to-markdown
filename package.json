@@ -1,30 +1,43 @@
 {
     "name": "@supercat1337/coverage-to-markdown",
-    "version": "1.1.0",
+    "version": "2.0.0",
     "description": "Convert coverage ranges into markdown snippets with line numbers, surrounding context lines, and automatic fence language detection.",
     "type": "module",
     "bin": {
         "coverage-to-markdown": "./src/coverage-to-markdown.js",
-        "cov2md": "./src/coverage-to-markdown.js"
+        "cov2md": "./src/coverage-to-markdown.js",
+        "coverage-json-to-markdown": "./src/json-report/cli.js",
+        "covgaps": "./src/json-report/cli.js"
     },
-    "main": "./src/coverage-to-markdown.js",
     "exports": {
         ".": {
             "types": "./src/types.d.ts",
-            "default": "./src/coverage-to-markdown.js"
-        }
+            "default": "./src/cov2md/index.js"
+        },
+        "./json-report": {
+            "types": "./src/json-report/index.d.ts",
+            "default": "./src/json-report/index.js"
+        },
+        "./package.json": "./package.json"
     },
+    "main": "./src/cov2md/index.js",
+    "types": "./src/types.d.ts",
+    "sideEffects": false,
     "engines": {
-        "node": ">=18"
+        "node": ">=22"
     },
     "files": [
         "src/"
     ],
     "scripts": {
         "start": "node ./src/coverage-to-markdown.js",
-        "test": "node --test",
+        "test": "c8 ava",
+        "test:fast": "ava",
+        "test:watch": "ava --watch",
+        "cov:gaps": "c8 --all --reporter=json ava && node ./src/json-report/cli.js",
         "lint": "eslint .",
-        "prepublishOnly": "npm test && npm run lint"
+        "typecheck": "tsc -p my.tsconfig.types.json",
+        "prepublishOnly": "npm test && npm run lint && npm run typecheck && npm pack --dry-run >/dev/null"
     },
     "keywords": [
         "coverage",
@@ -49,8 +62,19 @@
         "url": "https://github.com/supercat1337/coverage-to-markdown/issues"
     },
     "homepage": "https://github.com/supercat1337/coverage-to-markdown#readme",
-    "dependencies": {},
     "devDependencies": {
-        "eslint-plugin-jsdoc": "^63.3.3"
+        "@types/node": "^22.0.0",
+        "ava": "^8.0.1",
+        "c8": "^9.1.0",
+        "eslint": "^9.0.0",
+        "eslint-plugin-jsdoc": "^63.3.3",
+        "typescript": "^5.0.0"
+    },
+    "ava": {
+        "files": [
+            "tests/**/*.test.js",
+            "!tests/fixtures/**"
+        ],
+        "timeout": "60s"
     }
 }

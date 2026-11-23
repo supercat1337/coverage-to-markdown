@@ -1,11 +1,16 @@
 {
     "compilerOptions": {
-        "skipLibCheck": true,
-        "target": "ESNext",
+        "checkJs": true,
+        "allowJs": true,
+        "target": "es2022",
+        "lib": ["es2022"],
         "module": "NodeNext",
         "moduleResolution": "NodeNext",
+        "strict": true,
         "noEmit": true,
-        "lib": ["DOM", "ESNext"]
+        "skipLibCheck": true,
+        "types": ["node"]
     },
-    "exclude": ["node_modules", "dist"]
+    "exclude": ["node_modules/**", "coverage", "bundles", "tests"],
+    "include": ["src/**/*.js", "tests/**/*.js"]
 }

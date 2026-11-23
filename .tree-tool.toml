@@ -1,0 +1,28 @@
+# Base exclude patterns applied to every run.
+# CLI -e flags are merged with this list (deduplicated).
+#
+# For best performance, match the directory itself (no trailing /**).
+# See "Why match the directory itself?" below.
+exclude = [
+    "**/node_modules",
+    "**/bundles",
+    "**/build",
+    "**/deploy",
+    "**/coverage",
+    "**/docs",
+    "**/docs-md",
+    "**/.git",
+]
+
+# Defaults for boolean flags.
+# CLI --no-<flag> can still turn these off for a single run.
+files = true
+pretty = true
+ascii = false
+followSymlinks = false
+
+# Default output file; CLI -o overrides.
+# output = "tree.txt"
+
+# Default depth; CLI -d overrides. <= 0 means unlimited.
+# depth = -1
