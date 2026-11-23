@@ -37,7 +37,7 @@
         "cov:gaps": "c8 --all --reporter=json ava && node ./src/json-report/cli.js",
         "lint": "eslint .",
         "typecheck": "tsc -p my.tsconfig.types.json",
-        "prepublishOnly": "npm test && npm run lint && npm run typecheck && npm pack --dry-run >/dev/null"
+        "prepublishOnly": "npm test && npm run lint && npm run typecheck && npm pack --dry-run"
     },
     "keywords": [
         "coverage",
