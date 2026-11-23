@@ -49,11 +49,15 @@ test('readProvenance: git and timestamp together fill every field', t => {
     t.not(provenance.generated, null);
 });
 
-test('readProvenance: the dirty list holds paths, never absolute ones', t => {
-    const provenance = readProvenance(true, false);
+import { isAbsolute } from 'node:path';
 
-    for (const entry of provenance.dirty) {
-        t.false(entry.startsWith('/'), entry);
-        t.false(/^[A-Za-z]:\\/.test(entry), entry);
+test('readProvenance: the dirty list holds paths, never absolute ones', t => {
+    const { dirty } = readProvenance(true, false);
+
+    t.true(Array.isArray(dirty));
+
+    for (const path of dirty) {
+        t.false(isAbsolute(path), 'absolute path in dirty list: ' + path);
+        t.false(/^[A-Za-z]:[\\/]/.test(path), 'drive-letter path in dirty list: ' + path);
     }
 });
