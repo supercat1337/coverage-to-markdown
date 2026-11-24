@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // @ts-check
 
 import { isMainModule } from './is-main.js';
