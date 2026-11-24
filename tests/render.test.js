@@ -15,6 +15,8 @@ import test from 'ava';
 import { groupRegions } from '../src/json-report/regions.js';
 import { renderRegion } from '../src/json-report/render.js';
 import { blockGap, branchArm, fixtureFile, fixtureItem, linesOf } from './helpers/fixtures.js';
+import { enclosingClause, firstLiteral } from '../src/json-report/source.js';
+import { inlineCode } from '../src/json-report/format.js';
 
 /**
  * Render one labeled gap exactly as `buildReport` would.
@@ -23,13 +25,12 @@ import { blockGap, branchArm, fixtureFile, fixtureItem, linesOf } from './helper
  * @param {import('../src/json-report/types.js').HighlightMode} [options.highlight]
  * @param {number} [options.contextLines]
  * @param {number} [options.maxLines]
- * @param {string | null} [options.alsoIn]
  * @returns {string[]}
  */
 function linesOfRegion(item, options = {}) {
-    const { highlight = 'comment', contextLines = 0, maxLines = 80, alsoIn = null } = options;
+    const { highlight = 'comment', contextLines = 0, maxLines = 80 } = options;
     const [region] = groupRegions([item], contextLines, maxLines);
-    return renderRegion(region, highlight, alsoIn);
+    return renderRegion(region, highlight);
 }
 
 /**
@@ -46,7 +47,7 @@ function textOf(item, options = {}) {
 test('renderRegion: block outside a function names the span only', t => {
     const item = fixtureItem(blockGap(2, 3, 2));
 
-    t.is(linesOfRegion(item)[0], '### G1 · in `?` · lines 2–3');
+    t.is(linesOfRegion(item)[0], '### G1 · in no enclosing function · lines 2–3');
 });
 
 test('renderRegion: branch inside a function names the function and its span', t => {
@@ -177,12 +178,6 @@ test('renderRegion: a branch already shown as a block gets no second snippet', t
     t.false(linesOfRegion(item).some(line => line.startsWith('```')));
 });
 
-test('renderRegion: the cross-file note is printed when one is supplied', t => {
-    const text = textOf(fixtureItem(blockGap(2, 2)), { alsoIn: '> same code in `src/b.js` G4' });
-
-    t.true(text.includes('> same code in `src/b.js` G4'));
-});
-
 // --- snippet ------------------------------------------------------------
 
 test('renderRegion: the snippet carries the fence language and the reasons', t => {
@@ -259,4 +254,68 @@ test('renderGapLine: a generic role with an operand drops the role', t => {
     const text = textOf(item);
     t.true(text.includes('(`: String(error)`)'));
     t.false(text.includes('arm 1 of 1'));
+});
+
+test('firstLiteral skips a short literal and a comment quote', t => {
+    t.is(
+        firstLiteral(["const s = 'ab';", "throw new Error('cache.init failed');"], 1, 2),
+        'cache.init failed'
+    );
+    t.is(firstLiteral(["// don't"], 1, 1), null);
+});
+
+test('enclosingClause finds catch across a nested block', t => {
+    const lines = ['try {', '  if (a) {', '    b();', '  }', '} catch (err) {', '  c();', '}'];
+    t.is(enclosingClause(lines, 6), 'catch');
+    t.is(enclosingClause(lines, 3), null);
+});
+
+test('inlineCode picks a fence the value does not contain', t => {
+    t.is(inlineCode('a`b'), '`` a`b ``');
+    t.is(inlineCode('ab'), '`ab`');
+});
+
+test('renderRegion: a gap inside a catch is marked as such', t => {
+    const item = fixtureItem(blockGap(6, 6), {
+        sourceLines: ['try {', '  a();', '}', 'catch (err) {', '  log(err);', '  throw err;', '}'],
+    });
+
+    t.true(textOf(item).includes('· in `catch`'));
+});
+
+test('renderRegion: two gaps on one line keep the column', t => {
+    // Same line, same window, so the two gaps coalesce into one region and the
+    // column becomes the only thing telling their bullets apart.
+    const file = fixtureFile({ sourceLines: ['a', 'b', 'if (x && y) z;', 'd'] });
+    const first = {
+        label: 'G1',
+        file,
+        gap: {
+            kind: 'branch',
+            type: 'if',
+            line: 3,
+            column: 4,
+            arms: [branchArm(1, 3, 4, 6, 0)],
+            missingArms: [1],
+        },
+    };
+    const second = {
+        label: 'G2',
+        file,
+        gap: {
+            kind: 'branch',
+            type: 'binary-expr',
+            line: 3,
+            column: 8,
+            arms: [branchArm(1, 3, 8, 9, 0)],
+            missingArms: [1],
+        },
+    };
+
+    const [region] = groupRegions([first, second], 0, 80);
+    t.is(region.gaps.length, 2);
+
+    const text = renderRegion(region, 'comment').join('\n');
+    t.true(text.includes('line 3, col 4'));
+    t.true(text.includes('line 3, col 8'));
 });

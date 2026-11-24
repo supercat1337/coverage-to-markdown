@@ -12,7 +12,7 @@ attach to a PR, an issue, or a chat message.
 rendered as code. `covgaps` is the tool that finds the line numbers for you,
 including _which arm of which branch_ never executed.
 
-Requires Node.js **18 or newer**. Pure ESM, **zero runtime dependencies** —
+Requires Node.js **22 or newer**. Pure ESM, **zero runtime dependencies** —
 only `node:fs`, `node:path`, `node:url`, `node:util`, `node:crypto` and
 `node:child_process`.
 
@@ -146,8 +146,8 @@ Labels R1..RN are assigned per run and may change when lines shift.
 - **`Reproduce:`** appears only when `--command` is given. Backticks and
   newlines inside the command are replaced with single quotes and spaces
   respectively to keep the Markdown valid.
-- **`N range(s) · …`** states the count and the range convention. The number
-  and the noun are separate words (`1 range`, `2 ranges`), not a label.
+- **`N ranges · …`** states the count and the range convention. The number and
+  the noun are separate words (`1 range`, `2 ranges`), not a label.
 - **`Labels R1..RN …`** warns that section labels are per-run and should not
   be treated as stable references across regenerations.
 
@@ -396,7 +396,13 @@ Unlike the `text` table, which mixes two different things under one list of
 line numbers, this report separates them:
 
 - a **block** — lines that never executed at all;
-- a **branch** — a line that executed, but where one specific arm never did.
+- a **branch** — a line that executed, but where one specific arm never did;
+- a **never-called function** — a function whose call counter is zero, which no
+  statement or arm counter necessarily reveals.
+
+The terminal summary above uses the `block(s)` / `branch(es)` vocabulary and
+counts gaps only. The document's own `Gaps:` line, described below, counts
+never-called functions as well.
 
 ## CLI
 
@@ -511,9 +517,25 @@ source changed between the `c8` run and `covgaps`, the snippets match the hash
 while the coverage numbers describe the earlier version. A `0/0` row means the
 file has no executable statements.
 
+The `Gaps` column counts **reportable items**: gaps plus never-called
+functions. A file whose only problem is a function that never ran therefore
+shows `1`, not `0` — and gets a section below, so the summary and the details
+never disagree.
+
 Later sections list `Fully covered files` and `Files without executable code`
 separately. With `--all` enabled in `c8`, an empty file in the second list is
 also a hint that the module was never loaded.
+
+### Summary line
+
+```text
+Gaps: 28 (9 line blocks, 18 branches, 1 never-called function)
+```
+
+The leading number is the sum of the parenthetical, and the same sum as the
+`Gaps` column in the table above. Add the column up and you land on it — that
+is what the arithmetic is for. When nothing is wrong in scope, the line is
+replaced by a single sentence saying so.
 
 ### Gap sections
 
@@ -522,8 +544,8 @@ Each region is one heading, one bullet per gap, and the snippet the gaps share:
 ```text
 ### G1–G2 · in `describe` · lines 2–11
 
-- **G1** line 3, col 8 · `if` · else side (`fallback`) never executed
-- **G2** line 6, col 21 · `branch` · right operand of `??` (`'none'`) never executed
+- **G1** line 3 · `if` · else side (`fallback`) never executed
+- **G2** line 6 · `branch` · right operand of `??` (`'none'`) never executed
 ```
 
 Gaps that share one snippet window share a heading and one snippet, so a
@@ -531,32 +553,82 @@ function with two uncovered branches is printed once, not twice. A window cut
 by `--max-lines`, or split around a hole between two distant gaps, says
 `(excerpt)` in its heading.
 
-An uncovered block:
+### Bullet anatomy
+
+A bullet always starts with the label, then the location, then the kind. What
+follows the kind depends on the gap:
+
+| Suffix                                    | Meaning                                                                           |
+| ----------------------------------------- | --------------------------------------------------------------------------------- |
+| `else side (\`fallback\`) never executed` | the arm is named, with its source text when the operator could be recovered       |
+| `arms 2, 3 of 3 never executed`           | several arms missing, listed in nested bullets                                    |
+| `no arm ever executed`                    | the whole branch is dead code; the fix differs from a half-tested one             |
+| `says \`cache.init failed\``              | an uncovered block: the first string literal inside it, usually the error message |
+| `· in \`catch\``/`· in \`finally\``       | the gap sits inside that clause                                                   |
+
+The `catch` / `finally` marker is the most actionable classification in the
+document: those two clauses split cleanly into "a negative test is missing" and
+"unreachable by contract, mark it skipped", and without the marker the two look
+identical.
+
+The `says` fragment turns "where" into "what": the literal is both the meaning
+of the code and the best key to grep for in the test suite. Literals shorter
+than four characters and literals that begin with a space are skipped, because
+`'a'` and `' — see '` carry nothing a reader can use.
+
+**The column is printed only when it disambiguates.** `line 343` is the normal
+form; `line 42, col 7` appears only when another branch gap sits on the same
+line, where the column is the only thing telling the two bullets apart. The
+column is 0-based, as in the istanbul JSON.
+
+Two examples of the shared-line form:
 
 ```text
-### G1 · in `?` · lines 176–181
+- **G8** line 42, col 7 · `if` · then side never executed
+- **G9** line 42, col 24 · `binary-expr` · right operand of `&&` (`b`) never executed
+```
+
+### Uncovered blocks
+
+```text
+### G1 · in no enclosing function · lines 176–181
 
 - **G1** lines 176–181 · block · 4 statements never executed
 ```
 
-`in \`?\``is not a placeholder for a missing name: a block outside any
-function has no`fnMap`entry, and`?` is what the heading prints.
+`no enclosing function` is a label, not a placeholder for a missing name. The
+heading prints it when no span in `fnMap` covers the window: an arrow in a
+class field, module-level code, or a location v8 reported on a line that
+belongs to no function. These are the gaps that usually need a decision rather
+than a test, so the label is worth reading as a signal.
 
-A branch, with one arm never executed:
+An error path, with the message recovered:
+
+```text
+- **G5** lines 471–475 · block · 5 statements never executed · says `client context was not initialised before load()`
+```
+
+### Branch arms
 
 ```text
 ### G6 · in `createDnsAdapter` · line 216
 
-- **G6** line 216, col 59 · `branch` · right operand of `??` (`'Unauthorized'`) never executed
+- **G6** line 216 · `branch` · right operand of `??` (`'Unauthorized'`) never executed
 ```
 
 When several arms of one branch are missing, the bullet becomes a summary and
 the arms are listed beneath it:
 
 ```text
-- **G7** line 42, col 7 · `switch` · arms 2, 3 of 3 never executed
+- **G7** line 42 · `switch` · arms 2, 3 of 3 never executed
   - arm 2 of 3 — case 2
   - arm 3 of 3 — case 3
+```
+
+When none of them ever ran, the summary says so instead of listing every arm:
+
+```text
+- **G1** line 343 · `branch` · no arm ever executed
 ```
 
 Two things make this readable without guessing:
@@ -576,6 +648,28 @@ If the reported line holds no code at all, the section says so explicitly:
 > artefact around an implicit `else`, `default` or class field; treat it as
 > noise before writing a test.
 ```
+
+### Never called functions
+
+The function counter is independent of the statement and arm counters, so a
+file can have zero gaps and still be worth a look. That case gets its own line
+under the file heading:
+
+```text
+Never called: `resolve` (line 162) — see G7; `off` (line 48) — nothing to print
+```
+
+Each name ends in one of two ways:
+
+- **`— see G7`** — a region already prints this function's body; the label
+  points at it. Nothing is repeated.
+- **`— nothing to print`** — no region covers the body, so the document has no
+  snippet to offer. That is either an empty callback, a duplicate `fnMap` entry
+  for the same arrow, or a function shorter than the eight lines a snippet
+  window needs.
+
+Semicolons separate the entries because each one carries its own clause; a
+comma would fuse two of them into one sentence.
 
 ### Snippets
 
@@ -629,7 +723,7 @@ Pass `--json <path>` to write the same gaps as a separate file:
             "statements": { "covered": 82, "total": 82 },
             "branches": { "covered": 20, "total": 22 },
             "functions": { "covered": 12, "total": 12 },
-            "uncalledFunctions": [],
+            "uncalledFunctions": [{ "name": "resolve", "line": 162 }],
             "gaps": [
                 {
                     "label": "G6",
@@ -665,8 +759,10 @@ Pass `--json <path>` to write the same gaps as a separate file:
 The model does not repeat itself: an uncovered arm is simply one with
 `hits === 0`, so there is no second `missingArms` field that could disagree
 with the first. Labels are assigned once and shared with the Markdown, so
-`G6` means the same gap in both files. `schema` is bumped when the shape
-changes incompatibly.
+`G6` means the same gap in both files. `uncalledFunctions` is a list of
+`{ name, line }` — the raw function counter, with no snippet attached, which is
+why the Markdown adds the `— see` / `— nothing to print` hint itself.
+`schema` is bumped when the shape changes incompatibly.
 
 ### Ordering
 
@@ -717,6 +813,7 @@ import {
     buildModel,
     writeModel,
     readProvenance,
+    checkFreshness,
     SCHEMA_VERSION,
 } from '@supercat1337/coverage-to-markdown/json-report';
 ```
@@ -767,7 +864,7 @@ Notes on the pieces:
   behind it.
 - `buildModel(...)` and `writeModel(...)` produce the `--json` export;
   `SCHEMA_VERSION` is its current version.
-- The staleness check (`checkFreshness(reportPath, files)`) is exported from
+- The staleness check, `checkFreshness(reportPath, files)`, is exported from
   this entry point. Omitting `freshness` in `buildReport` keeps the silent
   default, so pass the result explicitly to surface stale coverage in a
   custom report.
@@ -837,6 +934,19 @@ reports real `if` / `switch` / `cond-expr` branch types rather than the generic
   already says "never executed" and the code is right above it, so the second
   bullet would only restate it. The phantom note covers branches outside a
   block; inside one, silence is deliberate.
+- **`— nothing to print` is not an error.** It means no region covers the
+  function's body: an empty callback, a duplicate `fnMap` entry for one arrow,
+  or a function shorter than the eight lines a snippet window requires. In the
+  last case the gap may still exist inside the function; it just does not have
+  a section of its own.
+- **The `says` fragment is a heuristic.** It is the first quoted string of four
+  or more characters on the uncovered lines, with line comments removed. A
+  message assembled from several pieces, or written with template literals,
+  will not be found.
+- **Allman-style braces are not recognised** by the `catch` / `finally` marker.
+  The keyword is read from the same line as its opening brace; a brace on its
+  own line is not followed upwards, so such a block is reported with no clause
+  marker.
 - **`covgaps` cannot list `c8 ignore` regions.** What is excluded on purpose is
   not recoverable from the report without re-implementing `c8`'s comment rules,
   so the document does not pretend to know it. If you need it, state the reason

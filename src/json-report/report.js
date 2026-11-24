@@ -12,7 +12,7 @@
  */
 
 import { code, metricLine, percentText } from './format.js';
-import { groupRegions, labelRange, regionHash } from './regions.js';
+import { groupRegions, labelRange } from './regions.js';
 import { renderRegion } from './render.js';
 
 /**
@@ -40,7 +40,12 @@ function fileTableRow(file) {
         file.totals.statements.covered + '/' + file.totals.statements.total,
         file.totals.branches.covered + '/' + file.totals.branches.total,
         file.totals.functions.covered + '/' + file.totals.functions.total,
-        String(file.gaps.length),
+        // Reportable items, not gaps: a never-called function sends the reader
+        // to a section just as a gap does. The old count printed `0` for a file
+        // that then had a `Never called:` line in its body — the summary said
+        // clean, the details said dirty, and a reader who stopped at the table
+        // was misled.
+        String(file.gaps.length + file.uncoveredFunctions.length),
     ];
     return '| ' + cells.join(' | ') + ' |';
 }
@@ -63,67 +68,58 @@ function legend(highlight) {
     }
     return [
         code('// 176 ← UNCOVERED') + ' — the line never executed.',
-        code('// 12 ← BRANCH 2/2') + ' — the line holds a branch whose arm 2 of 2 never executed.',
+        code('// 12 ← BRANCH 1/1') +
+            ' — the line holds a branch with at least one arm that never executed.',
     ];
 }
 
 /**
- * Grouping of regions by rendered source text, so a function copied into two
- * files is reported once as a duplication instead of twice as two problems.
- * @param {Region[]} regions
- * @returns {Map<string, Region[]>}
+ * The `Never called:` run-on line for one file.
+ *
+ * The function counter is independent of the statement and the arm counters: a
+ * no-op callback or an empty method has `f === 0` and contributes no gap, so
+ * this line used to name code the document never printed, and the reader could
+ * not tell "the snippet is three sections down" from "there is nothing to show".
+ *
+ * A region is found by matching the function span, not by asking whether the
+ * reported line falls inside the window: a long function is capped at
+ * `--max-lines`, and the window then legitimately starts below the declaration.
+ * `win.fn` names the enclosing function for the whole window, cut or not.
+ * @param {FileReport} file
+ * @param {Region[]} regions Regions already grouped for this file.
+ * @returns {string}
  */
-function groupByBody(regions) {
-    /** @type {Map<string, Region[]>} */
-    const byBody = new Map();
+function neverCalledNote(file, regions) {
+    const parts = file.uncoveredFunctions.map(fn => {
+        const where = fn.line === null ? '' : ' (line ' + fn.line + ')';
+        const body = code(fn.name) + where;
 
-    for (const region of regions) {
-        const hash = regionHash(region);
-        if (hash === null) {
-            continue;
+        // Copied to a local first: TypeScript re-widens a property inside a
+        // callback, because `fn.line` is not a constant from the compiler's
+        // point of view — the closure could observe a later write.
+        const line = fn.line;
+        const covering =
+            line === null
+                ? undefined
+                : regions.find(region => {
+                      const span = region.win.fn;
+                      return span !== null && span.declLine === line;
+                  });
+
+        if (covering !== undefined) {
+            return body + ' — see ' + labelRange(covering.gaps.map(item => item.label));
         }
-        const bucket = byBody.get(hash);
-        if (bucket === undefined) {
-            byBody.set(hash, [region]);
-        } else {
-            bucket.push(region);
-        }
-    }
 
-    return byBody;
-}
+        // No region means no block gap and no branch gap inside the body, which
+        // is exactly what there would be to print. Saying it outright beats
+        // leaving the reader to hunt for a snippet that does not exist — and a
+        // duplicate `fnMap` entry for the same arrow looks the same from here.
+        return body + ' — nothing to print';
+    });
 
-/**
- * `> The same code appears in ...` for a region whose snippet is a duplicate,
- * `null` otherwise. Stated on every occurrence, so either section is enough to
- * learn that one test closes both.
- * @param {Region} region
- * @param {Map<string, Region[]>} byBody
- * @returns {string | null}
- */
-function duplicateNote(region, byBody) {
-    const hash = regionHash(region);
-    if (hash === null) {
-        return null;
-    }
-
-    const bucket = byBody.get(hash);
-    if (bucket === undefined || bucket.length < 2) {
-        return null;
-    }
-
-    const others = bucket
-        .filter(other => other !== region)
-        .map(
-            other =>
-                code(other.file.displayPath) + ' ' + labelRange(other.gaps.map(item => item.label))
-        );
-
-    return (
-        '> The same code appears in ' +
-        others.join(' and ') +
-        '; a single test closes every gap listed there.'
-    );
+    // `; ` rather than `, `: each part may carry its own clause, and a comma
+    // would fuse two of them into one sentence.
+    return 'Never called: ' + parts.join('; ');
 }
 
 /**
@@ -159,13 +155,16 @@ export function buildReport(options) {
     push('# ' + title, '');
     push('Report: ' + code(reportDisplay), '');
     push('Scope: ' + scopeText, '');
+
     // Printed even without git: the reader must be able to tell "this document
     // was generated outside a repository" from "this document forgot to say".
     push(
         'Revision: ' +
             (provenance.revision === null ? '— (git unavailable)' : code(provenance.revision))
     );
-    
+
+    // `Dirty` only when a revision is known: without one, "no dirty files" would
+    // claim the tree was checked and clean, which is exactly what we cannot say.
     if (provenance.revision !== null) {
         const dirty =
             provenance.dirty.length === 0
@@ -174,10 +173,14 @@ export function buildReport(options) {
         push('Dirty: ' + dirty);
     }
 
+    // Blank line between the revision block and the timestamp, and exactly one
+    // after it. Pushing the blank inside the conditional left the timestamp
+    // glued to `Dirty` and doubled the gap before the table.
+    push('');
+
     if (provenance.generated !== null) {
         push('Generated: ' + code(provenance.generated), '');
     }
-    push('');
 
     if (freshness.stale.length > 0) {
         const listed = freshness.stale.slice(0, STALE_LISTED).map(code).join(', ');
@@ -254,8 +257,8 @@ export function buildReport(options) {
         }
     }
 
-    // Regions are computed once: the section loop needs them, and so does the
-    // duplicate scan, which has to see every file at the same time.
+    // Regions are computed once: the section loop needs them, and so does
+    // `Never called`, which cites the region that prints a function's body.
     /** @type {Array<{ file: FileReport, regions: Region[] }>} */
     const sections = files.map(file => {
         const fileGaps = labeled.filter(item => item.file === file);
@@ -264,20 +267,25 @@ export function buildReport(options) {
             regions: fileGaps.length === 0 ? [] : groupRegions(fileGaps, contextLines, maxLines),
         };
     });
-    const byBody = groupByBody(sections.flatMap(section => section.regions));
 
     if (labeled.length === 0 && uncalled === 0) {
         push('No uncovered lines, branches or functions were found in the selected scope.', '');
     } else {
+        // The leading number is the sum of the parenthetical, and the same sum
+        // as the `Gaps` column in the table. A reader who adds the column up
+        // must land on this number — that is the check the arithmetic is for.
         push(
             'Gaps: ' +
-                labeled.length +
+                (labeled.length + uncalled) +
                 ' (' +
                 blockCount +
                 ' line blocks, ' +
                 branchCount +
-                ' branches)' +
-                (uncalled > 0 ? ', ' + uncalled + ' never-called function(s)' : ''),
+                ' branches' +
+                (uncalled > 0
+                    ? ', ' + uncalled + ' never-called function' + (uncalled === 1 ? '' : 's')
+                    : '') +
+                ')',
             ''
         );
 
@@ -293,18 +301,45 @@ export function buildReport(options) {
             push('- ' + item);
         }
         push(
-            '- Locations use ' +
-                code('line:column') +
-                ' with a 0-based column, as in the istanbul JSON.'
+            '- Gap bullets read ' +
+                code('line 343') +
+                '; the 0-based column is added as ' +
+                code('col 22') +
+                ' only where two gaps share a line and it is the only thing telling them apart.'
+        );
+        push(
+            '- A block bullet may end with ' +
+                code('says `…`') +
+                ' — the first string literal inside the uncovered lines. It is usually the error ' +
+                'message, which is both the meaning and the best key to grep for in the tests.'
+        );
+        push(
+            '- ' +
+                code('· in `catch`') +
+                ' and ' +
+                code('· in `finally`') +
+                ' mark a gap inside those clauses. They are the two cases that split into "a ' +
+                'negative test is missing" and "unreachable by contract": decide which before writing code.'
+        );
+        push(
+            '- A heading that says ' +
+                code('no enclosing function') +
+                ' marks a gap outside every span in `fnMap`: an arrow in a class field, ' +
+                'module-level code, or a location v8 reported on a line that belongs to no function. ' +
+                'These are the gaps that need a decision rather than a test.'
+        );
+        push(
+            '- ' +
+                code('Never called:') +
+                ' names functions whose call counter is zero. A function the document prints ' +
+                'already is cited by its gap labels; one marked ' +
+                code('nothing to print') +
+                ' has no uncovered statement or branch in its body, so there is no snippet to expect.'
         );
         push(
             '- Gaps that share one snippet are listed under a single heading, so ' +
                 code('G13–G16') +
                 ' means four gaps inside the same window; the code is printed once, under the list.'
-        );
-        push(
-            '- A `> The same code appears in ...` note marks a snippet that is byte-identical ' +
-                'to one in another file: extract it, and one test closes every gap it names.'
         );
         push(
             '- Snippets are cut to the enclosing function taken from `fnMap`, expanded ' +
@@ -316,7 +351,8 @@ export function buildReport(options) {
         push(
             '- Branch arms are numbered from 1. When the source is readable the operator ' +
                 'between arms is recovered from the text, so an arm reads as ' +
-                '`right operand of ??` rather than `arm 2 of 2`.'
+                '`right operand of ??` rather than `arm 2 of 2`; when not one arm ran, the ' +
+                'bullet says `no arm ever executed` instead of listing them.'
         );
         push(
             '- This document is deliberately human-oriented. Pass ' +
@@ -336,11 +372,7 @@ export function buildReport(options) {
         push(metricLine(file.totals), '');
 
         if (file.uncoveredFunctions.length > 0) {
-            /** @type {string[]} */
-            const names = file.uncoveredFunctions.map(
-                fn => code(fn.name) + (fn.line === null ? '' : ' (line ' + fn.line + ')')
-            );
-            push('Never called: ' + names.join(', '), '');
+            push(neverCalledNote(file, fileRegions), '');
         }
 
         if (file.sourceLines === null) {
@@ -351,7 +383,7 @@ export function buildReport(options) {
         }
 
         for (const region of fileRegions) {
-            push(...renderRegion(region, highlight, duplicateNote(region, byBody)));
+            push(...renderRegion(region, highlight));
         }
     }
 

@@ -11,9 +11,9 @@
 
 import test from 'ava';
 
-import { sumTotals } from '../src/json-report/files.js';
+import { assignLabels, sumTotals } from '../src/json-report/files.js';
 import { buildReport } from '../src/json-report/report.js';
-import { blockGap, fixtureFile } from './helpers/fixtures.js';
+import { blockGap, fixtureFile, linesOf } from './helpers/fixtures.js';
 
 /**
  * One file with one block gap, rendered with the given overrides.
@@ -247,4 +247,49 @@ test('buildReport says so when nothing is uncovered', t => {
     });
 
     t.true(md.includes('No uncovered lines, branches or functions were found'));
+});
+
+test('buildReport: a never-called function cites its region, and two use the plural', t => {
+    // Spans longer than MIN_FUNCTION_SPAN (8): a shorter one is not used as a
+    // snippet window, `win.fn` stays null, and the "see G…" path becomes
+    // unreachable — which is how the first version of this test asserted a
+    // string the renderer could not produce.
+    const file = fixtureFile({
+        displayPath: 'src/a.js',
+        sourceLines: linesOf(30),
+        functions: [
+            { name: 'printed', startLine: 2, endLine: 20, declLine: 2 },
+            { name: 'silent', startLine: 22, endLine: 30, declLine: 22 },
+        ],
+        gaps: [blockGap(9, 9)],
+        uncoveredFunctions: [
+            { name: 'printed', line: 2 },
+            { name: 'silent', line: 22 },
+        ],
+    });
+
+    const md = buildReport({
+        title: 'Coverage gaps',
+        reportDisplay: 'r.json',
+        scopeText: 'all files · 1 file',
+        files: [file],
+        labeled: assignLabels([file]),
+        totals: sumTotals([file]),
+        contextLines: 0,
+        maxLines: 80,
+        highlight: 'comment',
+        provenance: { revision: null, dirty: [], generated: null },
+        freshness: { reportTime: null, stale: [], checked: 0 },
+    });
+
+    const neverCalled = md.split('\n').find(line => line.startsWith('Never called:'));
+    const gaps = md.split('\n').find(line => line.startsWith('Gaps:'));
+
+    // One fact per assertion: the citation, the no-snippet wording, the plural,
+    // and the arithmetic. A single `includes` of all four at once would say
+    // "false" without saying which part disagreed.
+    t.regex(neverCalled, /`printed` \(line 2\) — see G1/);
+    t.regex(neverCalled, /`silent` \(line 22\) — nothing to print/);
+    t.regex(gaps, /2 never-called functions/);
+    t.regex(gaps, /^Gaps: 3 \(1 line blocks, 0 branches, 2 never-called functions\)$/);
 });

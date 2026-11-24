@@ -162,6 +162,8 @@ export function analyzeFile(filePath, entry) {
 
     // --- functions ----------------------------------------------------
     /** @type {UncoveredFunction[]} */
+    // --- functions ----------------------------------------------------
+    /** @type {UncoveredFunction[]} */
     const uncoveredFunctions = [];
     for (const [id, meta] of Object.entries(fnMap)) {
         if (!meta) {
@@ -170,10 +172,15 @@ export function analyzeFile(filePath, entry) {
         if (Number(fnCounts[id] ?? 0) !== 0) {
             continue;
         }
-        const decl = meta.decl ?? meta.loc ?? null;
+
+        // `decl` first: it is the line a reader looks for, the signature, while
+        // `loc` covers the whole body. The second `?.` in each chain is
+        // load-bearing — a partial entry can carry `decl: {}` with no `start`
+        // at all, and the malformed-entry tests feed exactly that and expect
+        // `line: null` instead of a TypeError.
         uncoveredFunctions.push({
-            name: typeof meta.name === 'string' && meta.name.length > 0 ? meta.name : '(anonymous)',
-            line: decl && decl.start ? decl.start.line : null,
+            name: meta.name || '(anonymous)',
+            line: meta.decl?.start?.line ?? meta.loc?.start?.line ?? null,
         });
     }
 

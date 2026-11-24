@@ -119,3 +119,21 @@ export function blockLabel(gap) {
 export function locationLabel(gap) {
     return gap.column === null ? 'line ' + gap.line : 'line ' + gap.line + ', col ' + gap.column;
 }
+
+/**
+ * Inline code that survives a value containing backticks.
+ *
+ * `code()` always emits one backtick per side, so a value with a backtick closes
+ * the span early and the rest of the line turns into prose. A literal from
+ * source is the first place where that is reachable.
+ * @param {string} value
+ * @returns {string}
+ */
+export function inlineCode(value) {
+    const text = String(value);
+    if (!text.includes('`')) {
+        return '`' + text + '`';
+    }
+    const fence = '`'.repeat(2);
+    return fence + ' ' + text + ' ' + fence;
+}

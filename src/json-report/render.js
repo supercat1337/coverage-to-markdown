@@ -11,9 +11,10 @@
  */
 
 import { armDescriptors, isPhantomLine } from './branches.js';
-import { BT, code, locationLabel } from './format.js';
+import { BT, code, inlineCode, locationLabel } from './format.js';
 import { labelRange } from './regions.js';
 import { renderWindowBlock } from './snippet.js';
+import { enclosingClause, firstLiteral } from './source.js';
 
 /** @typedef {import('./types.js').ArmDescriptor} ArmDescriptor */
 /** @typedef {import('./types.js').HighlightMode} HighlightMode */
@@ -57,19 +58,46 @@ function armPhrase(descriptor) {
 }
 
 /**
- * Heading of one region: `G13–G16 · in selectFiles · lines 21–80 · 4 gaps`.
- * The count is omitted when the region holds a single gap, so the common case
- * stays as short as the old per-gap heading.
+ * ` · in `catch`` when the gap sits inside a `catch` or `finally`, empty
+ * otherwise.
+ *
+ * These two clauses are the single most useful classification in the document:
+ * they make up about four gaps in ten in real code, and they split cleanly into
+ * "a negative test is missing" and "unreachable by contract, mark it skipped" —
+ * two different actions that look identical without this note.
+ * @param {LabeledGap} item
+ * @param {number} line 1-based line inside the block.
+ * @returns {string}
+ */
+function clauseNote(item, line) {
+    const sourceLines = item.file.sourceLines;
+    if (sourceLines === null) {
+        return '';
+    }
+    const clause = enclosingClause(sourceLines, line);
+    return clause === null ? '' : ' · in ' + code(clause);
+}
+
+/**
+ * Heading of one region: `G13–G16 · in selectFiles · lines 21–80 (excerpt)`.
  * @param {Region} region
  * @returns {string}
  */
 export function regionHeading(region) {
     const cut = region.win.before !== null || region.win.after !== null || region.holes.length > 0;
+
+    // No span in `fnMap` covers this window. That is not missing data — it is
+    // the one case where the reader has to decide something: an arrow in a
+    // class field, module-level code, or a location v8 reported on a line that
+    // belongs to no function. Naming it `?` buried the signal; naming it
+    // outright turns it into the label it deserves.
+    const owner = region.win.fn === null ? 'no enclosing function' : code(region.win.fn.name);
+
     return (
         '### ' +
         labelRange(region.gaps.map(item => item.label)) +
         ' · in ' +
-        code(region.win.fn?.name ?? '?') +
+        owner +
         ' · ' +
         linesLabel(region.win.from, region.win.to) +
         (cut ? ' (excerpt)' : '')
@@ -78,15 +106,31 @@ export function regionHeading(region) {
 
 /**
  * One bullet per gap. Nested bullets appear only when a branch has several
- * missing arms; the single-arm case, which is the vast majority, stays one line.
+ * missing arms out of more than one; the single-arm case, which is the vast
+ * majority, stays one line.
+ *
+ * The order of the three cases is load-bearing. `missing.length === 1` comes
+ * first so a one-armed branch — `if (x)`, `catch`, a `?.` — keeps its operand
+ * phrase; an "every arm" check placed before it swallows that phrase and
+ * leaves the reader with nothing but "the branch never ran".
  * @param {LabeledGap} item
+ * @param {Set<number>} [sharedLines] Lines that carry more than one branch gap
+ * in this region; the column is printed only there.
  * @returns {string[]}
  */
-export function renderGapLine(item) {
+export function renderGapLine(item, sharedLines = new Set()) {
     const gap = item.gap;
 
     if (gap.kind === 'block') {
         const noun = gap.statements === 1 ? 'statement' : 'statements';
+
+        // An uncovered block is usually an error path, and an error path's whole
+        // identity is its message. `'cache.init failed'` tells the reader what
+        // the code does and what to grep for in `tests/`; `lines 624–626` tells
+        // them only where to look.
+        const sourceLines = item.file.sourceLines;
+        const literal = sourceLines === null ? null : firstLiteral(sourceLines, gap.start, gap.end);
+
         return [
             '- **' +
                 item.label +
@@ -96,19 +140,23 @@ export function renderGapLine(item) {
                 gap.statements +
                 ' ' +
                 noun +
-                ' never executed',
+                ' never executed' +
+                (literal === null ? '' : ' · says ' + inlineCode(literal)) +
+                clauseNote(item, gap.start),
         ];
     }
 
     const descriptors = armDescriptors(item.file, gap);
     const missing = gap.missingArms;
-    const head = '- **' + item.label + '** ' + locationLabel(gap) + ' · ' + code(gap.type) + ' · ';
+    const where = sharedLines.has(gap.line) ? locationLabel(gap) : 'line ' + gap.line;
+    const tail = clauseNote(item, gap.line);
+    const head = '- **' + item.label + '** ' + where + ' · ' + code(gap.type) + ' · ';
 
     // No "only arm" prefix: with one arm it adds nothing, and next to a
     // recovered operator it read as "only arm right operand of ??".
     if (missing.length === 1) {
         const phrase = armPhrase(descriptors[missing[0] - 1]);
-        return [head + phrase + ' never executed'];
+        return [head + phrase + ' never executed' + tail];
     }
 
     const summary =
@@ -117,7 +165,7 @@ export function renderGapLine(item) {
             : 'arms ' + missing.join(', ') + ' of ' + gap.arms.length + ' never executed';
 
     /** @type {string[]} */
-    const lines = [head + summary];
+    const lines = [head + summary + tail];
     for (const armIndex of missing) {
         lines.push(
             '  - arm ' +
@@ -171,27 +219,52 @@ function regionOwnsSnippet(region) {
 }
 
 /**
+ * Lines that hold more than one branch gap in this region.
+ *
+ * The column exists to tell two gaps on one line apart. Everywhere else it
+ * repeated `col 0` and `col 22` on millions of bullets and cost the reader a
+ * token per line for no information.
+ * @param {Region} region
+ * @returns {Set<number>}
+ */
+function sharedLineSet(region) {
+    /** @type {Map<number, number>} */
+    const counts = new Map();
+
+    for (const item of region.gaps) {
+        if (item.gap.kind !== 'branch') {
+            continue;
+        }
+        counts.set(item.gap.line, (counts.get(item.gap.line) ?? 0) + 1);
+    }
+
+    /** @type {Set<number>} */
+    const shared = new Set();
+    for (const [line, count] of counts) {
+        if (count > 1) {
+            shared.add(line);
+        }
+    }
+    return shared;
+}
+
+/**
  * One region: heading, the list of its gaps, then the code they share.
  * @param {Region} region
  * @param {HighlightMode} highlight
- * @param {string | null} [alsoIn] Cross-file note, see `duplicateNote` in
- * `report.js`. `null` when the same code appears nowhere else.
  * @returns {string[]}
  */
-export function renderRegion(region, highlight, alsoIn = null) {
+export function renderRegion(region, highlight) {
     /** @type {string[]} */
     const lines = [regionHeading(region), ''];
+    const shared = sharedLineSet(region);
 
     for (const item of region.gaps) {
-        lines.push(...renderGapLine(item));
+        lines.push(...renderGapLine(item, shared));
     }
     lines.push('');
 
     lines.push(...phantomNote(region));
-
-    if (alsoIn !== null) {
-        lines.push(alsoIn, '');
-    }
 
     if (regionOwnsSnippet(region)) {
         lines.push(...renderWindowBlock(region.file, region.win, highlight, region.holes));

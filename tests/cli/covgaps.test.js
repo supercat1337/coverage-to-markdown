@@ -196,7 +196,10 @@ test(`${COMMAND}: writes cov.md and prints a summary`, async t => {
     t.regex(result.stdout, /gaps:\s+4 \(2 block\(s\), 2 branch\(es\)\)/);
 
     const md = readFileSync(join(dir, 'cov.md'), 'utf8');
-    t.true(md.includes('Gaps: 4 (2 line blocks, 2 branches)'));
+    // The total now includes never-called functions, so the arithmetic of the
+    // parenthetical adds up to the leading number — and to the `Gaps` column in
+    // the table above it.
+    t.regex(md, /Gaps: \d+ \(2 line blocks, 2 branches(?:, 1 never-called function)?\)/);
 });
 
 test(`${COMMAND}: the document follows the documented shape`, async t => {
